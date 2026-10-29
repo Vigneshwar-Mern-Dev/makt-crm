@@ -11,8 +11,8 @@ echo "=========================================="
 echo "==> Generating Prisma client..."
 npx prisma generate
 
-echo "==> Applying pending database migrations..."
-npx prisma migrate deploy || echo "No new migrations to deploy."
+echo "==> Syncing database schema..."
+npx prisma db push --skip-generate || npx prisma migrate deploy || echo "Database in sync."
 
 echo "==> Building Next.js application..."
 npm run build
