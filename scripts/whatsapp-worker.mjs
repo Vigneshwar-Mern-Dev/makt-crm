@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 import "dotenv/config";
 import pkg from "whatsapp-web.js";
@@ -53,7 +55,12 @@ async function postBridge(payload) {
 }
 
 async function getOutboxLead() {
-  const response = await fetch(`${CRM_BASE_URL}/api/whatsapp/outbox`, {
+  const url = new URL(`${CRM_BASE_URL}/api/whatsapp/outbox`);
+  if (ACCOUNT_ID) {
+    url.searchParams.set("accountId", ACCOUNT_ID);
+  }
+
+  const response = await fetch(url.toString(), {
     headers: { "x-whatsapp-bridge-token": BRIDGE_TOKEN },
   });
 
@@ -64,14 +71,14 @@ async function getOutboxLead() {
   return response.json();
 }
 
-async function postOutboxResult(leadId, ok, error = null) {
+async function postOutboxResult(leadId, ok, error = null, errorType = null) {
   const response = await fetch(`${CRM_BASE_URL}/api/whatsapp/outbox`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       "x-whatsapp-bridge-token": BRIDGE_TOKEN,
     },
-    body: JSON.stringify({ leadId, ok, error }),
+    body: JSON.stringify({ leadId, ok, error, errorType }),
   });
 
   if (!response.ok) {
@@ -128,6 +135,10 @@ const client = new Client({
       "--disable-gpu",
       "--no-zygote",
       "--disable-extensions",
+      "--disk-cache-size=52428800",
+      "--media-cache-size=26214400",
+      "--disable-application-cache",
+      "--js-flags=--max-old-space-size=512",
     ],
   },
 });
@@ -164,10 +175,12 @@ async function handleReconnect(reason = "Connection lost") {
 
       // If it was an authentication failure, clear the auth directory to force a clean login/QR
       if (reason.toLowerCase().includes("auth") || reason.toLowerCase().includes("fail")) {
-        console.log("[worker] Clearing auth session directory due to auth failure...");
-        const fs = await import("fs");
-        if (fs.existsSync(".whatsapp-auth-new")) {
-          fs.rmSync(".whatsapp-auth-new", { recursive: true, force: true });
+        console.log(`[worker] Clearing auth session directory for ${ACCOUNT_ID || "primary"} due to auth failure...`);
+        const sessionDir = path.join(".whatsapp-auth-new", `session-${ACCOUNT_ID || "primary"}`);
+        if (fs.existsSync(sessionDir)) {
+          try {
+            fs.rmSync(sessionDir, { recursive: true, force: true });
+          } catch {}
         }
       }
 
@@ -236,9 +249,63 @@ client.on("message", async (msg) => {
   await postInboxReply(phone, msg.body || "");
 });
 
+// ── Delivery & Read Receipt listener (Blue ticks) ────────────────────────────
+async function postMessageAck(phone, ack) {
+  try {
+    await fetch(`${CRM_BASE_URL}/api/whatsapp/ack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-whatsapp-bridge-token": BRIDGE_TOKEN,
+      },
+      body: JSON.stringify({ phone, ack }),
+    }).catch(() => {});
+  } catch {}
+}
+
+client.on("message_ack", async (msg, ack) => {
+  if (!msg.to || msg.to.endsWith("@g.us") || msg.to.endsWith("@broadcast")) return;
+  const phone = fromWhatsAppId(msg.to);
+  if (!phone) return;
+
+  if (ack >= 3) {
+    console.log(`[ack] Blue tick (read) confirmed for ${phone}`);
+    await postMessageAck(phone, ack);
+  }
+});
+
 // ── Outbound sending loop ────────────────────────────────────────────────────
+let lastRecycleDate = new Date().toDateString();
+
+async function checkSoftRecycle() {
+  const now = new Date();
+  const currentHour = now.getHours();
+
+  // Soft recycle at 2:00 AM once per day when idle to clean Chrome V8 memory
+  if (currentHour === 2 && lastRecycleDate !== now.toDateString() && !sending && ready) {
+    lastRecycleDate = now.toDateString();
+    console.log("[worker] Executing scheduled nightly soft recycle (2:00 AM)...");
+    try {
+      ready = false;
+      await client.destroy().catch(() => {});
+      const cacheDir = ".wwebjs_cache";
+      if (fs.existsSync(cacheDir)) {
+        try {
+          fs.rmSync(cacheDir, { recursive: true, force: true });
+          console.log("[worker] Cleared .wwebjs_cache during nightly recycle.");
+        } catch {}
+      }
+      await sleep(5000);
+      console.log("[worker] Re-initializing WhatsApp client after nightly recycle...");
+      await client.initialize();
+    } catch (recycleErr) {
+      console.error("[worker] Nightly recycle error:", recycleErr);
+    }
+  }
+}
+
 async function sendNextLead() {
-  if (!ready || sending) return;
+  if (!ready || sending) return { hasWork: false };
 
   sending = true;
   let currentLeadId = null;
@@ -246,15 +313,20 @@ async function sendNextLead() {
   try {
     const outbox = await getOutboxLead();
 
-    if (!outbox.ok) return;
+    if (!outbox.ok) return { hasWork: false };
 
     if (outbox.logoutRequested) {
       console.log("[worker] Logout requested by server. Destroying session...");
       await postBridge({ status: "QR_REQUIRED", lastError: "Session reset." }).catch(() => {});
       try {
         await client.logout();
-      } catch (e) {}
-      import("fs").then(fs => fs.rmSync(".whatsapp-auth-new", { recursive: true, force: true }));
+      } catch {}
+      const sessionDir = path.join(".whatsapp-auth-new", `session-${ACCOUNT_ID || "primary"}`);
+      if (fs.existsSync(sessionDir)) {
+        try {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+        } catch {}
+      }
       process.exit(0);
     }
 
@@ -265,12 +337,12 @@ async function sendNextLead() {
           `[outbox] Hourly limit reached (${outbox.sentLastHour}/${outbox.hourlyLimit}). Waiting.`,
         );
       }
-      return;
+      return { hasWork: false };
     }
 
     if (isRestHour()) {
       console.log("[outbox] Midnight rest hour active (12:00 AM - 01:00 AM). Resting...");
-      return;
+      return { hasWork: false };
     }
 
     currentLeadId = outbox.lead.id;
@@ -290,7 +362,9 @@ async function sendNextLead() {
     }
 
     if (!isRegistered) {
-      throw new Error(`Phone number ${outbox.lead.phone} is not registered on WhatsApp.`);
+      const regErr = new Error(`Phone number ${outbox.lead.phone} is not registered on WhatsApp.`);
+      regErr.errorType = "NOT_REGISTERED";
+      throw regErr;
     }
 
     let chat = null;
@@ -317,6 +391,7 @@ async function sendNextLead() {
     await withTimeout(client.sendMessage(chatId, outbox.lead.message), 60000, "sendMessage timed out");
     await postOutboxResult(outbox.lead.id, true);
     console.log(`Sent WhatsApp message to ${outbox.lead.phone}.`);
+    return { hasWork: true };
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Unknown worker error";
@@ -324,19 +399,88 @@ async function sendNextLead() {
     // If the error happened during/after lead pickup, mark it FAILED
     // so it doesn't stay stuck in QUEUED indefinitely.
     if (currentLeadId) {
-      await postOutboxResult(currentLeadId, false, message).catch(() => {});
+      const errorType =
+        error?.errorType ||
+        (message.toLowerCase().includes("not registered")
+          ? "NOT_REGISTERED"
+          : message.toLowerCase().includes("invalid")
+            ? "INVALID_NUMBER"
+            : "DELIVERY_FAILURE");
+      await postOutboxResult(currentLeadId, false, message, errorType).catch(() => {});
     } else {
       // Pre-lead error (e.g. outbox fetch failed) — report bridge status only
       await postBridge({ status: "ERROR", lastError: message }).catch(() => {});
     }
+    return { hasWork: false };
   } finally {
     sending = false;
   }
 }
 
-setInterval(() => {
-  sendNextLead().catch((error) => console.error(error));
-}, Math.max(5000, POLL_MS));
+let lastDripCheckHour = -1;
+
+async function checkDripReengagement() {
+  const now = new Date();
+  const currentHour = now.getHours();
+  // Run once every 2 hours between 10:00 AM and 7:00 PM (10, 12, 14, 16, 18)
+  if (currentHour >= 10 && currentHour <= 19 && currentHour % 2 === 0 && lastDripCheckHour !== currentHour) {
+    lastDripCheckHour = currentHour;
+    try {
+      console.log("[worker] Triggering scheduled 24h WhatsApp re-engagement drip check...");
+      const res = await fetch(`${CRM_BASE_URL}/api/cron/whatsapp-drip`, {
+        method: "POST",
+        headers: { "x-whatsapp-bridge-token": BRIDGE_TOKEN },
+      });
+      const data = await res.json().catch(() => ({}));
+      console.log("[worker] Drip check completed:", data?.result?.queuedCount ?? 0, "messages queued.");
+    } catch (dripErr) {
+      console.warn("[worker] Drip trigger failed (ignoring):", dripErr.message);
+    }
+  }
+}
+
+let lastHealerCheckTime = 0;
+
+async function checkQueueHealer() {
+  const now = Date.now();
+  // Run every 5 minutes
+  if (now - lastHealerCheckTime >= 5 * 60 * 1000) {
+    lastHealerCheckTime = now;
+    try {
+      const res = await fetch(`${CRM_BASE_URL}/api/cron/queue-healer`, {
+        method: "POST",
+        headers: { "x-whatsapp-bridge-token": BRIDGE_TOKEN },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data?.result?.reclaimedCount > 0 || data?.result?.failedDlqCount > 0) {
+        console.log(
+          `[worker] DLQ Auto-Healer: Reclaimed ${data.result.reclaimedCount}, DLQ escalated ${data.result.failedDlqCount}`,
+        );
+      }
+    } catch (healErr) {
+      console.warn("[worker] Queue healer check failed (ignoring):", healErr.message);
+    }
+  }
+}
+
+// Adaptive polling loop: 5-10s when active leads exist, 20-25s when queue is empty to protect DB pooler
+async function startAdaptiveOutboxLoop() {
+  while (true) {
+    try {
+      await checkSoftRecycle();
+      await checkDripReengagement();
+      await checkQueueHealer();
+      const result = await sendNextLead();
+      const waitTime = result?.hasWork ? Math.max(5000, POLL_MS) : Math.max(20000, POLL_MS * 2);
+      await sleep(waitTime);
+    } catch (err) {
+      console.error("[worker] Polling loop error:", err);
+      await sleep(10000);
+    }
+  }
+}
+
+startAdaptiveOutboxLoop();
 
 process.on("SIGINT", async () => {
   await postBridge({ status: "DISCONNECTED" }).catch(() => {});

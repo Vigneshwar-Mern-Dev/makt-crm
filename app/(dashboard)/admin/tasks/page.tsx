@@ -69,8 +69,10 @@ function priorityClass(priority: TaskPriority) {
   return classes[priority];
 }
 
-async function getTaskData(status?: string, userId?: string) {
-  const where: Prisma.TaskWhereInput = {};
+import { requireOrgUser } from "@/app/lib/org-session";
+
+async function getTaskData(orgId: string, status?: string, userId?: string) {
+  const where: Prisma.TaskWhereInput = { organizationId: orgId };
 
   if (statusOptions.includes(status as TaskStatus)) {
     where.status = status as TaskStatus;
@@ -83,6 +85,7 @@ async function getTaskData(status?: string, userId?: string) {
   try {
     const [users, tasks] = await Promise.all([
       db.user.findMany({
+        where: { organizationId: orgId, isActive: true },
         orderBy: { username: "asc" },
         select: { id: true, username: true, email: true, role: true, department: true },
       }),
@@ -115,8 +118,9 @@ async function getTaskData(status?: string, userId?: string) {
 export default async function AdminTasksPage({
   searchParams,
 }: AdminTasksPageProps) {
+  const { org } = await requireOrgUser();
   const params = await searchParams;
-  const { users, tasks, error } = await getTaskData(params.status, params.user);
+  const { users, tasks, error } = await getTaskData(org.id, params.status, params.user);
   const overdueCount = tasks.filter((task) =>
     isOverdue(task.status, task.dueDate),
   ).length;

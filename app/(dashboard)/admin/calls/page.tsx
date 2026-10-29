@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { db } from "@/app/lib/db";
 import { expireStaleRingingCalls } from "@/app/lib/call-session-maintenance";
+import { requireOrgUser } from "@/app/lib/org-session";
 import {
   CallCenterTabs,
   CallStatusBadge,
@@ -15,7 +16,24 @@ import {
   formatDuration,
 } from "./call-ui";
 
+type AssignedGroupCount = {
+  assignedToId: string | null;
+  _count: { _all: number };
+};
+
+type UserGroupCount = {
+  userId: string | null;
+  _count: { _all: number };
+};
+
+type AssignedSessionSummary = {
+  assignedToId: string | null;
+  lead: { assignedToId: string | null } | null;
+  status?: string;
+};
+
 export default async function AdminCallCenterPage() {
+  const { org } = await requireOrgUser();
   await expireStaleRingingCalls();
 
   const currentTime = new Date();
@@ -52,20 +70,22 @@ export default async function AdminCallCenterPage() {
     allRecentWork,
   ] =
     await Promise.all([
-      db.callSession.count({ where: { firstRingAt: { gte: today } } }),
+      db.callSession.count({ where: { organizationId: org.id, firstRingAt: { gte: today } } }),
       db.callSession.count({
         where: {
+          organizationId: org.id,
           status: "MISSED",
           lead: { status: { in: [...actionableLeadStatuses] } },
         },
       }),
-      db.callSession.count({ where: { status: { in: ["RINGING", "ANSWERED"] }, endedAt: null } }),
+      db.callSession.count({ where: { organizationId: org.id, status: { in: ["RINGING", "ANSWERED"] }, endedAt: null } }),
       db.callLead.count({
-        where: { phone: { not: { startsWith: "UNKNOWN-" } }, status: { in: [...actionableLeadStatuses] } },
+        where: { organizationId: org.id, phone: { not: { startsWith: "UNKNOWN-" } }, status: { in: [...actionableLeadStatuses] } },
       }),
-      db.companyPhone.count({ where: { isActive: true } }),
+      db.companyPhone.count({ where: { organizationId: org.id, isActive: true } }),
       db.companyPhone.count({
         where: {
+          organizationId: org.id,
           isActive: true,
           OR: [
             { lastSeenAt: null },
@@ -76,7 +96,7 @@ export default async function AdminCallCenterPage() {
         },
       }),
       db.callSession.findMany({
-        where: { callerNumber: { not: { startsWith: "UNKNOWN-" } } },
+        where: { organizationId: org.id, callerNumber: { not: { startsWith: "UNKNOWN-" } } },
         include: {
           companyPhone: { select: { phoneNumber: true, label: true } },
           lead: { select: { id: true, phone: true, displayName: true } },
@@ -85,7 +105,7 @@ export default async function AdminCallCenterPage() {
         take: 8,
       }),
       db.callSession.findMany({
-        where: { status: { in: ["RINGING", "ANSWERED"] }, endedAt: null },
+        where: { organizationId: org.id, status: { in: ["RINGING", "ANSWERED"] }, endedAt: null },
         include: {
           companyPhone: { select: { phoneNumber: true, label: true } },
           lead: {
@@ -103,32 +123,35 @@ export default async function AdminCallCenterPage() {
         orderBy: { firstRingAt: "desc" },
         take: 6,
       }),
-      db.callLead.count({ where: { createdAt: { gte: today }, phone: { not: { startsWith: "UNKNOWN-" } } } }),
+      db.callLead.count({ where: { organizationId: org.id, createdAt: { gte: today }, phone: { not: { startsWith: "UNKNOWN-" } } } }),
       db.callSession.count({
         where: {
+          organizationId: org.id,
           status: "MISSED",
           firstRingAt: { lt: new Date(currentTime.getTime() - 30 * 60 * 1000) },
           lead: { status: { in: [...actionableLeadStatuses] } },
         },
       }),
       db.user.findMany({
-        where: { role: "USER" },
+        where: { organizationId: org.id, isActive: true },
         orderBy: { username: "asc" },
         select: { id: true, username: true, email: true },
       }),
       // Grouped queries
       db.callLead.groupBy({
         by: ["assignedToId"],
+        where: { organizationId: org.id },
         _count: { _all: true },
       }),
       db.callLead.groupBy({
         by: ["assignedToId"],
-        where: { status: { in: [...actionableLeadStatuses] } },
+        where: { organizationId: org.id, status: { in: [...actionableLeadStatuses] } },
         _count: { _all: true },
       }),
       db.callActivity.groupBy({
         by: ["userId"],
         where: {
+          lead: { organizationId: org.id },
           actionType: "ASSIGNMENT_CHANGE",
           description: { contains: "claimed" },
           createdAt: { gte: today },
@@ -137,22 +160,23 @@ export default async function AdminCallCenterPage() {
       }),
       db.callLead.groupBy({
         by: ["assignedToId"],
-        where: { sheetSyncedAt: { gte: today } },
+        where: { organizationId: org.id, sheetSyncedAt: { gte: today } },
         _count: { _all: true },
       }),
       db.callFollowUp.groupBy({
         by: ["assignedToId"],
-        where: { completedAt: null },
+        where: { lead: { organizationId: org.id }, completedAt: null },
         _count: { _all: true },
       }),
       db.callLead.groupBy({
         by: ["assignedToId"],
-        where: { status: { in: [...outcomeStatuses] }, updatedAt: { gte: today } },
+        where: { organizationId: org.id, status: { in: [...outcomeStatuses] }, updatedAt: { gte: today } },
         _count: { _all: true },
       }),
       db.callActivity.groupBy({
         by: ["userId"],
         where: {
+          lead: { organizationId: org.id },
           actionType: "NOTE_ADDED",
           description: "Call lead customer details updated",
           createdAt: { gte: today },
@@ -162,6 +186,7 @@ export default async function AdminCallCenterPage() {
       db.callActivity.groupBy({
         by: ["userId"],
         where: {
+          lead: { organizationId: org.id },
           OR: [
             { actionType: "FOLLOW_UP_UPDATE" },
             { actionType: "NOTE_ADDED", description: { startsWith: "Call lead status updated" } },
@@ -172,6 +197,7 @@ export default async function AdminCallCenterPage() {
       }),
       db.callSession.findMany({
         where: {
+          organizationId: org.id,
           firstRingAt: { gte: today },
           callDirection: "OUTGOING",
         },
@@ -183,6 +209,7 @@ export default async function AdminCallCenterPage() {
       }),
       db.callSession.findMany({
         where: {
+          organizationId: org.id,
           status: { in: ["RINGING", "ANSWERED"] },
           endedAt: null,
         },
@@ -193,6 +220,7 @@ export default async function AdminCallCenterPage() {
       }),
       db.callSession.findMany({
         where: {
+          organizationId: org.id,
           status: "MISSED",
         },
         select: {
@@ -202,6 +230,7 @@ export default async function AdminCallCenterPage() {
       }),
       db.callActivity.findMany({
         where: {
+          lead: { organizationId: org.id },
           actionType: { in: ["ASSIGNMENT_CHANGE", "FOLLOW_UP_UPDATE", "NOTE_ADDED"] },
           NOT: { description: { startsWith: "Saved in CRM only" } },
           createdAt: { gte: today },
@@ -219,37 +248,37 @@ export default async function AdminCallCenterPage() {
     ]);
 
   // Helpers to fetch grouped counts
-  const getGroupCount = (group: { assignedToId: string | null; _count: { _all: number } }[], agentId: string) => {
+  const getGroupCount = (group: readonly AssignedGroupCount[], agentId: string) => {
     return group.find((g) => g.assignedToId === agentId)?._count._all ?? 0;
   };
-  const getUserGroupCount = (group: { userId: string | null; _count: { _all: number } }[], agentId: string) => {
+  const getUserGroupCount = (group: readonly UserGroupCount[], agentId: string) => {
     return group.find((g) => g.userId === agentId)?._count._all ?? 0;
   };
 
   // Memory filtering functions for callSessions matching assignedFilter
-  const matchesAssignedFilter = (session: { assignedToId: string | null; lead: { assignedToId: string | null } | null }, agentId: string) => {
+  const matchesAssignedFilter = (session: AssignedSessionSummary, agentId: string) => {
     return session.assignedToId === agentId || session.lead?.assignedToId === agentId;
   };
 
   const agentRows = await Promise.all(
     agents.map(async (agent) => {
-      const ownedLeads = getGroupCount(ownedLeadsGroup as any, agent.id);
-      const openLeads = getGroupCount(openLeadsGroup as any, agent.id);
-      const claimedToday = getUserGroupCount(claimedTodayGroup as any, agent.id);
-      const sheetSavedToday = getGroupCount(sheetSavedTodayGroup as any, agent.id);
-      const followUps = getGroupCount(followUpsGroup as any, agent.id);
-      const outcomesToday = getGroupCount(outcomesTodayGroup as any, agent.id);
-      const detailUpdatesToday = getUserGroupCount(detailUpdatesTodayGroup as any, agent.id);
-      const workflowUpdatesToday = getUserGroupCount(workflowUpdatesTodayGroup as any, agent.id);
+      const ownedLeads = getGroupCount(ownedLeadsGroup, agent.id);
+      const openLeads = getGroupCount(openLeadsGroup, agent.id);
+      const claimedToday = getUserGroupCount(claimedTodayGroup, agent.id);
+      const sheetSavedToday = getGroupCount(sheetSavedTodayGroup, agent.id);
+      const followUps = getGroupCount(followUpsGroup, agent.id);
+      const outcomesToday = getGroupCount(outcomesTodayGroup, agent.id);
+      const detailUpdatesToday = getUserGroupCount(detailUpdatesTodayGroup, agent.id);
+      const workflowUpdatesToday = getUserGroupCount(workflowUpdatesTodayGroup, agent.id);
 
       // In-memory calculations for session counts
-      const outgoingCallsToday = outgoingCallsTodayGroup.filter((s: any) => matchesAssignedFilter(s, agent.id)).length;
-      const completed = outgoingCallsTodayGroup.filter((s: any) => matchesAssignedFilter(s, agent.id) && s.status === "COMPLETED").length;
-      const live = liveSessionsGroup.filter((s: any) => matchesAssignedFilter(s, agent.id)).length;
-      const missed = missedSessionsGroup.filter((s: any) => matchesAssignedFilter(s, agent.id)).length;
+      const outgoingCallsToday = outgoingCallsTodayGroup.filter((session) => matchesAssignedFilter(session, agent.id)).length;
+      const completed = outgoingCallsTodayGroup.filter((session) => matchesAssignedFilter(session, agent.id) && session.status === "COMPLETED").length;
+      const live = liveSessionsGroup.filter((session) => matchesAssignedFilter(session, agent.id)).length;
+      const missed = missedSessionsGroup.filter((session) => matchesAssignedFilter(session, agent.id)).length;
 
       // Filter recent work for this agent
-      const recentWork = allRecentWork.filter((w: any) => w.userId === agent.id).slice(0, 5);
+      const recentWork = allRecentWork.filter((work) => work.userId === agent.id).slice(0, 5);
 
       // Fetch last session (this is a fast select)
       const lastSession = await db.callSession.findFirst({
@@ -509,7 +538,7 @@ export default async function AdminCallCenterPage() {
                       <div className="rounded-lg border border-white/10 bg-white/[0.02] p-4">
                         <h3 className="text-xs font-black uppercase tracking-[0.14em] text-cyan-100">Recent user activity</h3>
                         <div className="mt-3 space-y-3">
-                          {agent.recentWork.map((activity: any) => (
+                          {agent.recentWork.map((activity) => (
                             <div className="text-xs" key={activity.id}>
                               <p className="font-bold text-white">{activity.lead.displayName}</p>
                               <p className="mt-1 text-slate-500">{activity.description}</p>

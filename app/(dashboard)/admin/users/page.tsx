@@ -1,7 +1,8 @@
 import { db } from "@/app/lib/db";
 import { CreateUserButton } from "./CreateUserButton";
 import { UserRowActions } from "./UserRowActions";
-import { getCurrentUser } from "@/app/lib/session";
+import { requireOrgUser } from "@/app/lib/org-session";
+import Link from "next/link";
 
 type UserListItem = {
   id: string;
@@ -9,6 +10,7 @@ type UserListItem = {
   email: string;
   role: "ADMIN" | "USER";
   department: string;
+  isActive: boolean;
   createdAt: Date;
 };
 
@@ -19,9 +21,10 @@ type CurrentUser = {
   role: "ADMIN" | "USER";
 } | null;
 
-async function getUsers() {
+async function getUsers(organizationId: string) {
   try {
     const users = await db.user.findMany({
+      where: { organizationId },
       orderBy: { createdAt: "desc" },
       select: {
         id: true,
@@ -29,6 +32,7 @@ async function getUsers() {
         email: true,
         role: true,
         department: true,
+        isActive: true,
         createdAt: true,
       },
     });
@@ -90,9 +94,16 @@ function UserTable({
                   </td>
                   <td className="px-5 py-4 text-slate-400">{user.email}</td>
                   <td className="px-5 py-4">
-                    <span className="rounded-lg border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-xs font-semibold text-cyan-100">
-                      {user.role}
-                    </span>
+                    <div className="flex flex-wrap gap-1.5">
+                      <span className="rounded-lg border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-xs font-semibold text-cyan-100">
+                        {user.role}
+                      </span>
+                      {!user.isActive ? (
+                        <span className="rounded-lg border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-xs font-semibold text-amber-200">
+                          INACTIVE
+                        </span>
+                      ) : null}
+                    </div>
                   </td>
                   <td className="px-5 py-4 text-slate-400">
                     {user.createdAt.toLocaleDateString("en-IN", {
@@ -121,8 +132,9 @@ function UserTable({
 }
 
 export default async function AdminUsersPage() {
-  const { users, error } = await getUsers();
-  const currentUser = await getCurrentUser();
+  const { user: currentUser, org } = await requireOrgUser();
+  const { users, error } = await getUsers(org.id);
+  const currentAdminUser: CurrentUser = { ...currentUser, role: "ADMIN" };
 
   // 1. Partition admins
   const admins = users.filter((u) => u.role === "ADMIN");
@@ -156,7 +168,13 @@ export default async function AdminUsersPage() {
             Provision and manage registered accounts, dynamically grouped and displayable by departments.
           </p>
         </div>
-        <div className="shrink-0 sm:mt-1">
+        <div className="flex items-center gap-2.5 shrink-0 sm:mt-1">
+          <Link
+            href="/admin/settings/members"
+            className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-2.5 text-xs font-bold text-cyan-300 transition hover:bg-cyan-500/20 flex items-center gap-1.5"
+          >
+            Invite via Link →
+          </Link>
           <CreateUserButton />
         </div>
       </section>
@@ -174,7 +192,7 @@ export default async function AdminUsersPage() {
             title="Administrators"
             subtitle="Full access control and system configuration privileges"
             users={admins}
-            currentUser={currentUser}
+            currentUser={currentAdminUser}
             borderColor="border-l-rose-500"
             badgeTone="bg-rose-500/10 text-rose-300 border border-rose-500/20"
           />
@@ -211,7 +229,7 @@ export default async function AdminUsersPage() {
               title={`${dept} Team`}
               subtitle={`Accounts assigned to the ${dept.toLowerCase()} department`}
               users={deptUsers}
-              currentUser={currentUser}
+              currentUser={currentAdminUser}
               borderColor={borderColor}
               badgeTone={badgeTone}
             />

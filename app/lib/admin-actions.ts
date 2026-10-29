@@ -2,8 +2,11 @@
 
 import { db } from "./db";
 import { hashPassword } from "./password";
-import { requireRole } from "./session";
+import { passwordPolicyError } from "./password-policy";
+import { createSession, requireRole } from "./session";
 import { revalidatePath } from "next/cache";
+
+import { requireOrgRole } from "./org-session";
 
 interface CreateUserData {
   username: string;
@@ -28,19 +31,20 @@ function errorMessage(error: unknown, fallback: string) {
 
 export async function adminCreateUserAction(data: CreateUserData) {
   try {
-    // 1. Ensure caller is an authenticated ADMIN
-    await requireRole("ADMIN");
+    // 1. Ensure caller is an authenticated ADMIN in their organization
+    const { org } = await requireOrgRole("ADMIN");
 
     const username = data.username.trim().toLowerCase();
     const email = data.email.trim().toLowerCase();
-    const password = data.password ? data.password.trim() : "";
+    const password = data.password ?? "";
 
     if (!username || !email || !password) {
       return { error: "Username, email, and password are all required." };
     }
 
-    if (password.length < 8) {
-      return { error: "Password must be at least 8 characters long." };
+    const passwordError = passwordPolicyError(password);
+    if (passwordError) {
+      return { error: passwordError };
     }
 
     // 2. Check for duplicate username/email
@@ -62,19 +66,31 @@ export async function adminCreateUserAction(data: CreateUserData) {
     // 3. Hash password
     const passwordHash = await hashPassword(password);
 
-    // 4. Insert into database
-    await db.user.create({
-      data: {
-        username,
-        email,
-        passwordHash,
-        role: data.role,
-        department: data.department,
-      },
+    // 4. Insert into database with organization scope and OrgMember relation
+    await db.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          username,
+          email,
+          passwordHash,
+          role: data.role,
+          department: data.department,
+          organizationId: org.id,
+        },
+      });
+
+      await tx.orgMember.create({
+        data: {
+          organizationId: org.id,
+          userId: newUser.id,
+          role: data.role === "ADMIN" ? "ADMIN" : "MEMBER",
+        },
+      });
     });
 
     // 5. Refresh the user page listing
     revalidatePath("/admin/users");
+    revalidatePath("/admin/settings/members");
 
     return { success: true };
   } catch (error: unknown) {
@@ -88,7 +104,7 @@ export async function adminCreateUserAction(data: CreateUserData) {
 export async function adminEditUserAction(data: EditUserData) {
   try {
     // 1. Ensure caller is an authenticated ADMIN
-    await requireRole("ADMIN");
+    const caller = await requireRole("ADMIN");
 
     const username = data.username.trim().toLowerCase();
     const email = data.email.trim().toLowerCase();
@@ -118,6 +134,7 @@ export async function adminEditUserAction(data: EditUserData) {
       role: "ADMIN" | "USER";
       department: string;
       passwordHash?: string;
+      sessionVersion?: { increment: number };
     } = {
       username,
       email,
@@ -126,18 +143,25 @@ export async function adminEditUserAction(data: EditUserData) {
     };
 
     // 3. Hash new password if supplied
-    if (data.password && data.password.trim()) {
-      if (data.password.trim().length < 8) {
-        return { error: "Password must be at least 8 characters long." };
+    if (data.password) {
+      const passwordError = passwordPolicyError(data.password);
+      if (passwordError) {
+        return { error: passwordError };
       }
-      updateData.passwordHash = await hashPassword(data.password.trim());
+      updateData.passwordHash = await hashPassword(data.password);
+      updateData.sessionVersion = { increment: 1 };
     }
 
     // 4. Update database record
-    await db.user.update({
+    const updatedUser = await db.user.update({
       where: { id: data.id },
       data: updateData,
+      select: { id: true, role: true, sessionVersion: true },
     });
+
+    if (data.password && caller.id === data.id) {
+      await createSession(updatedUser);
+    }
 
     // 5. Refresh page listing
     revalidatePath("/admin/users");
@@ -162,7 +186,7 @@ export async function adminDeleteUserAction(userId: string) {
 
     const target = await db.user.findUnique({
       where: { id: userId },
-      select: { role: true },
+      select: { role: true, isActive: true },
     });
 
     if (!target) {
@@ -170,16 +194,27 @@ export async function adminDeleteUserAction(userId: string) {
     }
 
     if (target.role === "ADMIN") {
-      const adminCount = await db.user.count({ where: { role: "ADMIN" } });
+      const adminCount = await db.user.count({ where: { role: "ADMIN", isActive: true } });
 
       if (adminCount <= 1) {
         return { error: "You cannot delete the last admin account." };
       }
     }
 
-    // 2. Delete user from the database
-    await db.user.delete({
+    if (!target.isActive) {
+      return { success: true };
+    }
+
+    // Deactivate instead of deleting. Historical tasks, comments, calls, and
+    // audit records must remain attached to the original account.
+    await db.user.update({
       where: { id: userId },
+      data: {
+        isActive: false,
+        deactivatedAt: new Date(),
+        deactivatedBy: caller.id,
+        sessionVersion: { increment: 1 },
+      },
     });
 
     // 3. Refresh user page listing
@@ -189,5 +224,35 @@ export async function adminDeleteUserAction(userId: string) {
   } catch (error: unknown) {
     console.error("Error in adminDeleteUserAction:", error);
     return { error: errorMessage(error, "An unexpected error occurred while deleting the user.") };
+  }
+}
+
+export async function adminRestoreUserAction(userId: string) {
+  try {
+    await requireRole("ADMIN");
+
+    const target = await db.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+
+    if (!target) {
+      return { error: "User not found." };
+    }
+
+    await db.user.update({
+      where: { id: userId },
+      data: {
+        isActive: true,
+        deactivatedAt: null,
+        deactivatedBy: null,
+      },
+    });
+
+    revalidatePath("/admin/users");
+    return { success: true };
+  } catch (error: unknown) {
+    console.error("Error in adminRestoreUserAction:", error);
+    return { error: errorMessage(error, "An unexpected error occurred while restoring the user.") };
   }
 }

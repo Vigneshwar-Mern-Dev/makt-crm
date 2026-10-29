@@ -3,6 +3,8 @@ import { requireRole } from "@/app/lib/session";
 import { getUserWorkloadSummary } from "@/app/lib/user-workload";
 import { UserShell } from "./components/user-shell";
 
+export const dynamic = "force-dynamic";
+
 export default async function UserLayout({
   children,
 }: Readonly<{

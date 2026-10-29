@@ -6,6 +6,8 @@ import { usePathname } from "next/navigation";
 import { logoutAction } from "@/app/lib/auth-actions";
 import { CallCenterLiveSync } from "../../components/call-center-live-sync";
 import { IncomingCallPopup } from "./incoming-call-popup";
+import { WhatsAppStatusPopup } from "./whatsapp-status-popup";
+import { AgentAvailabilityPill } from "./agent-availability-pill";
 
 type AdminShellProps = {
   children: ReactNode;
@@ -13,6 +15,12 @@ type AdminShellProps = {
     username: string;
     email: string;
   };
+  org?: {
+    name: string;
+    slug: string;
+  };
+  orgRole?: string;
+  availabilityStatus?: "ONLINE" | "BUSY" | "OFFLINE";
 };
 
 type NavItem = {
@@ -36,8 +44,8 @@ const navItems: NavItem[] = [
     ),
   },
   {
-    href: "/admin/users",
-    label: "Users",
+    href: "/admin/settings/members",
+    label: "Team & Invites",
     icon: (
       <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none">
         <path d="M16 19c0-2.2-1.8-4-4-4H7c-2.2 0-4 1.8-4 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
@@ -83,6 +91,15 @@ const navItems: NavItem[] = [
     ],
   },
   {
+    href: "/admin/client-processing",
+    label: "Client Processing",
+    icon: (
+      <svg aria-hidden="true" className="h-4 w-4" viewBox="0 0 24 24" fill="none">
+        <path d="M17 20h5v-2a3 3 0 0 0-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 0 1 5.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 0 1 9.288 0M15 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2 2 0 1 1-4 0 2 2 0 0 1 4 0ZM7 10a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
+  {
     href: "/admin/whatsapp",
     label: "WhatsApp",
     icon: (
@@ -93,6 +110,7 @@ const navItems: NavItem[] = [
     ),
     children: [
       { href: "/admin/whatsapp", label: "Overview" },
+      { href: "/admin/whatsapp/inbox", label: "Inbox" },
       { href: "/admin/whatsapp/leads", label: "Leads" },
       { href: "/admin/whatsapp/settings", label: "Settings" },
     ],
@@ -117,10 +135,18 @@ const navItems: NavItem[] = [
         <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 0 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7A2 2 0 0 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 .9-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 0 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     ),
+    children: [
+      { href: "/admin/settings", label: "Overview" },
+      { href: "/admin/settings/organization", label: "Organization Profile" },
+      { href: "/admin/settings/members", label: "Members & Invites" },
+      { href: "/admin/settings/lead-distribution", label: "Lead Distribution" },
+      { href: "/admin/settings/google-sheets", label: "Google Sheets Sync" },
+      { href: "/admin/settings/developer", label: "API & Webhooks" },
+    ],
   },
 ];
 
-export function AdminShell({ children, user }: AdminShellProps) {
+export function AdminShell({ children, user, org, orgRole, availabilityStatus }: AdminShellProps) {
   const pathname = usePathname();
   const initials = user.username.slice(0, 2).toUpperCase() || "AD";
   const callCenter = navItems.find((item) => item.href === "/admin/calls");
@@ -131,12 +157,12 @@ export function AdminShell({ children, user }: AdminShellProps) {
       <div className="flex h-full min-h-0">
         <aside className="hidden h-full w-72 shrink-0 overflow-y-auto border-r border-white/10 bg-[#0a0d13] p-5 lg:flex lg:flex-col">
           <Link className="mb-8 flex items-center gap-3" href="/admin">
-            <span className="grid h-10 w-10 place-items-center rounded-lg bg-cyan-300 text-sm font-black text-slate-950">
-              MA
+            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-cyan-300 text-sm font-black text-slate-950">
+              {org?.name ? org.name.slice(0, 2).toUpperCase() : "MA"}
             </span>
-            <span>
-              <span className="block text-base font-bold">MAKT</span>
-              <span className="text-xs text-slate-500">Admin console</span>
+            <span className="min-w-0">
+              <span className="block text-base font-bold truncate text-white">{org?.name || "MAKT"}</span>
+              <span className="text-xs text-slate-500 truncate block">{orgRole ? `${orgRole} console` : "Admin console"}</span>
             </span>
           </Link>
 
@@ -239,8 +265,11 @@ export function AdminShell({ children, user }: AdminShellProps) {
                   Control users, activity, and platform settings.
                 </p>
               </div>
-              <div className="grid h-10 w-10 place-items-center rounded-lg border border-white/10 bg-white/10 text-sm font-bold lg:hidden">
-                {initials}
+              <div className="flex items-center gap-3">
+                <AgentAvailabilityPill initialStatus={availabilityStatus || "ONLINE"} />
+                <div className="grid h-10 w-10 place-items-center rounded-lg border border-white/10 bg-white/10 text-sm font-bold lg:hidden">
+                  {initials}
+                </div>
               </div>
             </div>
 
@@ -312,6 +341,7 @@ export function AdminShell({ children, user }: AdminShellProps) {
       </div>
       {pathname.startsWith("/admin/calls") ? <CallCenterLiveSync /> : null}
       <IncomingCallPopup />
+      <WhatsAppStatusPopup />
     </main>
   );
 }

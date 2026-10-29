@@ -1,6 +1,9 @@
 import Link from "next/link";
 import { db } from "@/app/lib/db";
+import { requireOrgUser } from "@/app/lib/org-session";
 import { CallLeadStatus, TaskStatus, WhatsAppLeadStatus } from "@/app/lib/prisma-enums";
+
+export const dynamic = "force-dynamic";
 
 function formatDate(value: Date | null) {
   if (!value) {
@@ -15,7 +18,7 @@ function formatDate(value: Date | null) {
   });
 }
 
-async function getOverviewData() {
+async function getOverviewData(organizationId: string) {
   try {
     const openCallStatuses = [
       CallLeadStatus.NEW,
@@ -29,8 +32,8 @@ async function getOverviewData() {
     todayStart.setHours(0, 0, 0, 0);
 
     const [
-      totalUsers,
-      adminUsers,
+      totalMembers,
+      adminMembers,
       openTasks,
       overdueTasks,
       openCallLeads,
@@ -38,25 +41,30 @@ async function getOverviewData() {
       callFollowUps,
       recentCallLeads,
       waSentToday,
-      waStatusCounts,
+      waQueued,
+      waReplied,
+      phoneCount,
+      waAccountCount,
     ] = await Promise.all([
-      db.user.count(),
-      db.user.count({ where: { role: "ADMIN" } }),
+      db.orgMember.count({ where: { organizationId } }),
+      db.orgMember.count({ where: { organizationId, role: { in: ["ADMIN", "OWNER"] } } }),
       db.task.count({
-        where: { status: { in: [TaskStatus.PENDING, TaskStatus.IN_PROGRESS] } },
+        where: { organizationId, status: { in: [TaskStatus.PENDING, TaskStatus.IN_PROGRESS] } },
       }),
       db.task.count({
         where: {
+          organizationId,
           dueDate: { lt: new Date() },
           status: { notIn: [TaskStatus.COMPLETED, TaskStatus.CANCELLED] },
         },
       }),
-      db.callLead.count({ where: { status: { in: openCallStatuses } } }),
+      db.callLead.count({ where: { organizationId, status: { in: openCallStatuses }, deletedAt: null, isArchived: false } }),
       db.callLead.count({
-        where: { assignedToId: null, status: { in: openCallStatuses } },
+        where: { organizationId, assignedToId: null, status: { in: openCallStatuses }, deletedAt: null, isArchived: false },
       }),
-      db.callFollowUp.count({ where: { completedAt: null } }),
+      db.callFollowUp.count({ where: { lead: { organizationId }, completedAt: null } }),
       db.callLead.findMany({
+        where: { organizationId, deletedAt: null, isArchived: false },
         orderBy: { createdAt: "desc" },
         take: 6,
         select: {
@@ -68,22 +76,19 @@ async function getOverviewData() {
           createdAt: true,
         },
       }),
-      db.whatsAppLead.count({ where: { status: WhatsAppLeadStatus.SENT, lastSentAt: { gte: todayStart } } }),
-      db.whatsAppLead.groupBy({
-        by: ["status"],
-        where: { status: { in: [WhatsAppLeadStatus.QUEUED, WhatsAppLeadStatus.REPLIED] } },
-        _count: { _all: true },
-      }),
+      db.whatsAppQueueItem.count({ where: { organizationId, sentAt: { gte: todayStart }, deletedAt: null, isArchived: false } }),
+      db.whatsAppQueueItem.count({ where: { organizationId, status: { in: ["QUEUED", "SENDING"] }, deletedAt: null, isArchived: false } }),
+      db.whatsAppLead.count({ where: { organizationId, OR: [{ status: WhatsAppLeadStatus.REPLIED }, { lastReplyAt: { not: null } }], deletedAt: null, isArchived: false } }),
+      db.companyPhone.count({ where: { organizationId } }),
+      db.whatsAppAccount.count({ where: { organizationId } }),
     ]);
 
-    const standardUsers = totalUsers - adminUsers;
-    const waQueued = waStatusCounts.find((c) => c.status === WhatsAppLeadStatus.QUEUED)?._count._all ?? 0;
-    const waReplied = waStatusCounts.find((c) => c.status === WhatsAppLeadStatus.REPLIED)?._count._all ?? 0;
+    const standardUsers = Math.max(0, totalMembers - adminMembers);
 
     return {
       data: {
-        totalUsers,
-        adminUsers,
+        totalUsers: totalMembers,
+        adminUsers: adminMembers,
         standardUsers,
         openTasks,
         overdueTasks,
@@ -94,6 +99,8 @@ async function getOverviewData() {
         waQueued,
         waSentToday,
         waReplied,
+        phoneCount,
+        waAccountCount,
       },
       error: null,
     };
@@ -112,6 +119,8 @@ async function getOverviewData() {
         waQueued: 0,
         waSentToday: 0,
         waReplied: 0,
+        phoneCount: 0,
+        waAccountCount: 0,
       },
       error: "Database is unreachable. Dashboard numbers are temporarily unavailable.",
     };
@@ -119,44 +128,129 @@ async function getOverviewData() {
 }
 
 export default async function AdminDashboard() {
-  const { data, error } = await getOverviewData();
+  const { org } = await requireOrgUser();
+  const { data, error } = await getOverviewData(org.id);
+
+  const isSetupIncomplete = data.phoneCount === 0 || data.waAccountCount === 0 || data.totalUsers <= 1;
 
   return (
     <div className="space-y-6 pb-8">
-      {/* ── Hero Header ─────────────────────────────────────────────────── */}
+      {/* Hero header */}
       <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-cyan-300/[0.08] via-white/[0.02] to-transparent p-6 md:p-8">
         <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-cyan-400/10 blur-3xl" />
         <div className="relative flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.28em] text-cyan-300">
-              MAKT CRM — Admin
+              {org.name} - Admin
             </p>
             <h1 className="mt-3 text-4xl font-black tracking-tight text-white md:text-5xl">
               Dashboard
             </h1>
             <p className="mt-2 max-w-xl text-sm leading-6 text-slate-400">
-              Platform access, task risk, WhatsApp automation, and call center activity in one place.
+              Platform access, task risk, WhatsApp automation, and call center activity for {org.name}.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
             <Link className="h-10 rounded-xl border border-cyan-300/30 bg-cyan-300/15 px-4 text-sm font-bold leading-10 text-cyan-100 transition hover:bg-cyan-300/25" href="/admin/calls/leads">
-              📞 Call leads
+              Call Leads
             </Link>
             <Link className="h-10 rounded-xl border border-white/10 px-4 text-sm font-semibold leading-10 text-slate-200 transition hover:bg-white/10" href="/admin/tasks">
-              ✅ Tasks
+              Tasks
             </Link>
             <Link className="h-10 rounded-xl border border-white/10 px-4 text-sm font-semibold leading-10 text-slate-200 transition hover:bg-white/10" href="/admin/analytics">
-              📊 Analytics
+              Analytics
             </Link>
             <Link className="h-10 rounded-xl border border-emerald-300/30 bg-emerald-300/15 px-4 text-sm font-bold leading-10 text-emerald-100 transition hover:bg-emerald-300/25" href="/admin/whatsapp">
-              💬 WhatsApp
+              WhatsApp
             </Link>
             <Link className="h-10 rounded-xl border border-white/10 px-4 text-sm font-semibold leading-10 text-slate-300 transition hover:bg-white/10" href="/admin/audit">
-              🗒 Audit log
+              Audit Log
             </Link>
           </div>
         </div>
       </section>
+
+      {/* SaaS Onboarding Quickstart Banner (shown when organization setup is incomplete) */}
+      {isSetupIncomplete ? (
+        <section className="relative overflow-hidden rounded-2xl border border-cyan-400/30 bg-gradient-to-r from-cyan-950/40 via-slate-900/60 to-slate-900/40 p-6 backdrop-blur-md">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+            <div>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider bg-cyan-400/20 text-cyan-300 border border-cyan-400/30">
+                Setup Checklist
+              </span>
+              <h2 className="mt-2 text-xl font-bold text-white">Complete your {org.name} Workspace Setup</h2>
+              <p className="text-xs text-slate-400 mt-1">Get your telecalling, automated WhatsApp drip, and team workflow operational in a few steps.</p>
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Link
+              href="/admin/settings/developer"
+              className={`rounded-xl border p-4 transition-all hover:scale-[1.02] ${
+                data.phoneCount > 0 ? "border-emerald-500/30 bg-emerald-500/10" : "border-white/10 bg-white/[0.02] hover:border-cyan-400/30"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">Step 1</span>
+                {data.phoneCount > 0 ? (
+                  <span className="text-xs font-bold text-emerald-400">✓ Connected</span>
+                ) : (
+                  <span className="text-xs font-semibold text-cyan-400">Configure</span>
+                )}
+              </div>
+              <p className="mt-2 text-sm font-bold text-white">Lead Ingestion / Phones</p>
+              <p className="text-xs text-slate-400 mt-1">Get your API key or pair Android companion app.</p>
+            </Link>
+
+            <Link
+              href="/admin/whatsapp/settings"
+              className={`rounded-xl border p-4 transition-all hover:scale-[1.02] ${
+                data.waAccountCount > 0 ? "border-emerald-500/30 bg-emerald-500/10" : "border-white/10 bg-white/[0.02] hover:border-emerald-400/30"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">Step 2</span>
+                {data.waAccountCount > 0 ? (
+                  <span className="text-xs font-bold text-emerald-400">✓ Active</span>
+                ) : (
+                  <span className="text-xs font-semibold text-emerald-400">Connect</span>
+                )}
+              </div>
+              <p className="mt-2 text-sm font-bold text-white">WhatsApp Sender</p>
+              <p className="text-xs text-slate-400 mt-1">Scan QR code to enable auto-replies & drips.</p>
+            </Link>
+
+            <Link
+              href="/admin/settings/members"
+              className={`rounded-xl border p-4 transition-all hover:scale-[1.02] ${
+                data.totalUsers > 1 ? "border-emerald-500/30 bg-emerald-500/10" : "border-white/10 bg-white/[0.02] hover:border-violet-400/30"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">Step 3</span>
+                {data.totalUsers > 1 ? (
+                  <span className="text-xs font-bold text-emerald-400">✓ {data.totalUsers} Members</span>
+                ) : (
+                  <span className="text-xs font-semibold text-violet-400">Invite</span>
+                )}
+              </div>
+              <p className="mt-2 text-sm font-bold text-white">Team & Telecallers</p>
+              <p className="text-xs text-slate-400 mt-1">Invite agents or create direct logins.</p>
+            </Link>
+
+            <Link
+              href="/admin/settings/lead-distribution"
+              className="rounded-xl border border-white/10 bg-white/[0.02] p-4 transition-all hover:scale-[1.02] hover:border-amber-400/30"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-400">Step 4</span>
+                <span className="text-xs font-semibold text-amber-400">Rules</span>
+              </div>
+              <p className="mt-2 text-sm font-bold text-white">SLA & Distribution</p>
+              <p className="text-xs text-slate-400 mt-1">Configure round-robin & auto-reassignment.</p>
+            </Link>
+          </div>
+        </section>
+      ) : null}
 
       {error ? (
         <div className="rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
@@ -164,14 +258,14 @@ export default async function AdminDashboard() {
         </div>
       ) : null}
 
-      {/* ── KPI Cards ───────────────────────────────────────────────────── */}
+      {/* KPI cards */}
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {([
           { 
             label: "Open call leads", 
             value: data.openCallLeads, 
             detail: "Needs operator action", 
-            icon: "📞", 
+            icon: "Calls",
             accent: "from-cyan-400/[0.05]", 
             border: "border-cyan-500/10", 
             tone: "text-cyan-300", 
@@ -181,7 +275,7 @@ export default async function AdminDashboard() {
             label: "Unassigned", 
             value: data.unassignedCallLeads, 
             detail: "No owner assigned", 
-            icon: "⚠️", 
+            icon: "Owner",
             accent: "from-sky-400/[0.05]", 
             border: "border-sky-500/10", 
             tone: "text-sky-300", 
@@ -191,7 +285,7 @@ export default async function AdminDashboard() {
             label: "Follow-ups", 
             value: data.callFollowUps, 
             detail: "Open callback work", 
-            icon: "🔔", 
+            icon: "Due",
             accent: "from-amber-400/[0.05]", 
             border: "border-amber-500/10", 
             tone: "text-amber-300", 
@@ -201,7 +295,7 @@ export default async function AdminDashboard() {
             label: "Open tasks", 
             value: data.openTasks, 
             detail: `${data.overdueTasks} overdue`, 
-            icon: "📋", 
+            icon: "Tasks",
             accent: "from-rose-400/[0.05]", 
             border: "border-rose-500/10", 
             tone: "text-rose-300", 
@@ -221,26 +315,26 @@ export default async function AdminDashboard() {
                 <p className={`mt-3 text-5xl font-black tracking-tight ${tone}`}>{value}</p>
                 <p className="mt-2 text-xs text-slate-500">{detail}</p>
               </div>
-              <span className="text-2xl opacity-60 transition-transform duration-300 group-hover:scale-110">{icon}</span>
+              <span className="text-xs font-bold uppercase tracking-wide opacity-60 transition-transform duration-300 group-hover:scale-110">{icon}</span>
             </div>
           </div>
         ))}
       </section>
 
-      {/* ── WhatsApp Panel ──────────────────────────────────────────────── */}
+      {/* WhatsApp panel */}
       <section className="group relative overflow-hidden rounded-2xl border border-emerald-500/15 bg-gradient-to-br from-emerald-500/[0.03] via-white/[0.01] to-transparent p-6 backdrop-blur-md transition-all duration-300 hover:border-emerald-400/40 hover:shadow-[0_0_35px_rgba(16,185,129,0.08)]">
         <div className="pointer-events-none absolute -bottom-12 -right-12 h-40 w-40 rounded-full bg-emerald-400/5 blur-3xl transition-all duration-500 group-hover:scale-110" />
         <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-base font-bold text-white flex items-center gap-2">
               <span className="animate-pulse h-2 w-2 rounded-full bg-emerald-400 inline-block" />
-              💬 WhatsApp automation
+              WhatsApp automation
             </h2>
             <p className="mt-1 text-sm text-slate-400">Today&apos;s outbound messaging snapshot</p>
           </div>
           <div className="flex gap-2">
             <Link className="h-9 rounded-xl border border-white/10 px-4 text-xs font-semibold leading-9 text-slate-200 transition-all duration-200 hover:bg-white/10 hover:border-white/25" href="/admin/whatsapp">
-              View panel →
+              View panel
             </Link>
           </div>
         </div>
@@ -258,7 +352,7 @@ export default async function AdminDashboard() {
         </div>
       </section>
 
-      {/* ── Recent leads + User summary ─────────────────────────────────── */}
+      {/* Recent leads and user summary */}
       <section className="grid gap-4 xl:grid-cols-[1.3fr_0.7fr]">
         {/* Recent call leads */}
         <div className="group rounded-2xl border border-white/10 bg-white/[0.01] p-6 backdrop-blur-md transition-all duration-300 hover:border-white/15 hover:shadow-[0_0_25px_rgba(255,255,255,0.02)]">
@@ -268,7 +362,7 @@ export default async function AdminDashboard() {
               <p className="mt-0.5 text-xs text-slate-500">Latest call records from the call center</p>
             </div>
             <Link className="h-8 rounded-lg border border-white/10 px-4 text-xs font-bold leading-8 text-slate-200 transition-all duration-200 hover:bg-white/10 hover:border-white/20" href="/admin/calls/leads">
-              View all →
+              View all
             </Link>
           </div>
 
@@ -290,7 +384,7 @@ export default async function AdminDashboard() {
                         {lead.displayName || lead.phone || "Unknown caller"}
                       </p>
                       <p className="mt-0.5 text-xs text-slate-500">
-                        {lead.assignedTo?.username || "Unassigned"} · {formatDate(lead.createdAt)}
+                        {lead.assignedTo?.username || "Unassigned"} - {formatDate(lead.createdAt)}
                       </p>
                     </div>
                   </div>
@@ -322,8 +416,8 @@ export default async function AdminDashboard() {
                 </div>
               ))}
             </div>
-            <Link className="mt-4 flex h-10 items-center justify-center rounded-xl border border-white/10 text-sm font-semibold text-slate-200 transition-all duration-200 hover:bg-white/10 hover:border-white/20" href="/admin/users">
-              Manage users
+            <Link className="mt-4 flex h-10 items-center justify-center rounded-xl border border-white/10 text-sm font-semibold text-slate-200 transition-all duration-200 hover:bg-white/10 hover:border-white/20" href="/admin/settings/members">
+              Manage team members
             </Link>
           </div>
 
@@ -331,10 +425,10 @@ export default async function AdminDashboard() {
             <h2 className="text-base font-bold text-white">Quick links</h2>
             <div className="mt-3 space-y-2">
               {([
-                ["/admin/analytics", "📊 Analytics"],
-                ["/admin/audit", "🗒 Audit log"],
-                ["/admin/calls/missed", "📵 Callbacks"],
-                ["/admin/whatsapp/leads", "📋 WA leads"],
+                ["/admin/analytics", "Analytics"],
+                ["/admin/audit", "Audit Log"],
+                ["/admin/calls/missed", "Callbacks"],
+                ["/admin/whatsapp/leads", "WhatsApp Leads"],
               ] as const).map(([href, label]) => (
                 <Link key={href} href={href} className="flex h-10 items-center rounded-xl border border-white/5 bg-black/10 px-4 text-sm font-semibold text-slate-300 transition-all duration-200 hover:border-white/10 hover:bg-white/[0.04] hover:text-white">
                   {label}
@@ -347,4 +441,5 @@ export default async function AdminDashboard() {
     </div>
   );
 }
+
 

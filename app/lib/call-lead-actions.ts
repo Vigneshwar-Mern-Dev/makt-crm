@@ -6,6 +6,7 @@ import { requireRole, requireUser } from "./session";
 import type { CallLeadStatus } from "@prisma/client";
 import { LeadSource } from "./prisma-enums";
 import { autoQueueWhatsAppForCaller } from "./whatsapp-auto-queue";
+import { autoAssignCallLead, recordLeadResponse } from "./lead-distribution";
 
 function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
@@ -40,6 +41,11 @@ function parseFollowUp(value: string | undefined) {
 
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function optionalTrimmedUpdate(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function hasSheetReadyCallLeadDetails(lead: {
@@ -92,10 +98,15 @@ async function syncCallLeadBackToSheet(lead: {
   lastCallDirection: string | null;
   lastCallDurationSeconds: number | null;
   updatedAt: Date;
+  organizationId?: string | null;
 }) {
-  const integration = await db.leadIntegration.findUnique({
-    where: { source: LeadSource.INSTAGRAM },
-  });
+  const integration = (lead.organizationId
+    ? await db.leadIntegration.findFirst({
+        where: { organizationId: lead.organizationId, source: LeadSource.CALLS },
+      })
+    : null) || (await db.leadIntegration.findFirst({
+        where: { source: LeadSource.CALLS },
+      }));
 
   if (!integration?.appScriptUrl || !integration.spreadsheetId || !integration.sheetName) {
     return "Call lead saved in CRM, but Call Leads sheet sync is not configured.";
@@ -177,15 +188,55 @@ function revalidateCallViews() {
 
 export async function adminDeleteCallLeadsAction(leadIds: string[]) {
   try {
-    await requireRole("ADMIN");
+    const admin = await requireRole("ADMIN");
 
     if (!leadIds.length) {
       return { error: "No call leads selected." };
     }
 
-    await db.callLead.deleteMany({
-      where: { id: { in: leadIds } },
-    });
+    const now = new Date();
+    await db.$transaction([
+      db.callLead.updateMany({
+        where: { id: { in: leadIds } },
+        data: {
+          isArchived: true,
+          archivedAt: now,
+          archivedBy: admin.id,
+          deletedAt: now,
+          deletedBy: admin.id,
+        },
+      }),
+      db.callSession.updateMany({
+        where: { leadId: { in: leadIds } },
+        data: {
+          isArchived: true,
+          archivedAt: now,
+          archivedBy: admin.id,
+          deletedAt: now,
+          deletedBy: admin.id,
+        },
+      }),
+      db.callFollowUp.updateMany({
+        where: { leadId: { in: leadIds } },
+        data: {
+          isArchived: true,
+          archivedAt: now,
+          archivedBy: admin.id,
+          deletedAt: now,
+          deletedBy: admin.id,
+        },
+      }),
+      ...leadIds.map((leadId) =>
+        db.callActivity.create({
+          data: {
+            leadId,
+            userId: admin.id,
+            actionType: "ARCHIVED",
+            description: "Call lead archived by admin",
+          },
+        }),
+      ),
+    ]);
 
     revalidateCallViews();
     return { success: true };
@@ -197,15 +248,43 @@ export async function adminDeleteCallLeadsAction(leadIds: string[]) {
 
 export async function adminDeleteCallSessionAction(sessionId: string) {
   try {
-    await requireRole("ADMIN");
+    const admin = await requireRole("ADMIN");
 
     if (!sessionId) {
       return { error: "Call session is required." };
     }
 
-    await db.callSession.delete({
+    const session = await db.callSession.findUnique({
       where: { id: sessionId },
+      select: { id: true, leadId: true },
     });
+
+    if (!session) {
+      return { error: "Call session not found." };
+    }
+
+    const now = new Date();
+    await db.$transaction([
+      db.callSession.update({
+        where: { id: session.id },
+        data: {
+          isArchived: true,
+          archivedAt: now,
+          archivedBy: admin.id,
+          deletedAt: now,
+          deletedBy: admin.id,
+        },
+      }),
+      db.callActivity.create({
+        data: {
+          leadId: session.leadId,
+          sessionId: session.id,
+          userId: admin.id,
+          actionType: "ARCHIVED",
+          description: "Call session archived by admin",
+        },
+      }),
+    ]);
 
     revalidateCallViews();
     return { success: true };
@@ -217,7 +296,7 @@ export async function adminDeleteCallSessionAction(sessionId: string) {
 
 export async function adminDeleteMissedCallbacksForLeadAction(sessionId: string) {
   try {
-    await requireRole("ADMIN");
+    const admin = await requireRole("ADMIN");
 
     if (!sessionId) {
       return { error: "Call session is required." };
@@ -232,12 +311,40 @@ export async function adminDeleteMissedCallbacksForLeadAction(sessionId: string)
       return { error: "Call session not found." };
     }
 
-    const result = await db.callSession.deleteMany({
+    const missedSessions = await db.callSession.findMany({
       where: {
         leadId: session.leadId,
         status: "MISSED",
+        deletedAt: null,
+      },
+      select: { id: true },
+    });
+
+    const now = new Date();
+    const result = await db.callSession.updateMany({
+      where: {
+        id: { in: missedSessions.map((missedSession) => missedSession.id) },
+      },
+      data: {
+        isArchived: true,
+        archivedAt: now,
+        archivedBy: admin.id,
+        deletedAt: now,
+        deletedBy: admin.id,
       },
     });
+
+    if (missedSessions.length) {
+      await db.callActivity.create({
+        data: {
+          leadId: session.leadId,
+          userId: admin.id,
+          actionType: "ARCHIVED",
+          description: `Archived ${missedSessions.length} missed callback session(s)`,
+          metadata: { sessionIds: missedSessions.map((missedSession) => missedSession.id) },
+        },
+      });
+    }
 
     revalidateCallViews();
     return { success: true, deletedCount: result.count };
@@ -253,8 +360,8 @@ export async function adminAssignCallLeadAction(leadId: string, assignedToId: st
     let assigneeName = "Unassigned";
 
     if (assignedToId) {
-      const assignee = await db.user.findUnique({
-        where: { id: assignedToId },
+      const assignee = await db.user.findFirst({
+        where: { id: assignedToId, isActive: true },
         select: { username: true },
       });
 
@@ -320,6 +427,15 @@ export async function updateCallLeadStatusAction(leadId: string, status: CallLea
       },
     });
 
+    // Record SLA response when lead transitions out of NEW
+    if (lead.status === "NEW" && status !== "NEW") {
+      try {
+        await recordLeadResponse(leadId, user.id);
+      } catch (err) {
+        console.error("recordLeadResponse failed for lead", leadId, err);
+      }
+    }
+
     revalidateCallViews();
     return { success: true };
   } catch (error) {
@@ -384,14 +500,14 @@ export async function createManualCallLeadAction(data: {
       where: { phone },
       update: {
         displayName,
-        email: data.email?.trim() || null,
-        city: data.city?.trim() || null,
-        language: data.language?.trim() || null,
-        address: data.address?.trim() || null,
-        ownershipType: data.ownershipType?.trim() || null,
-        locationSent: Boolean(data.locationSent),
-        message: data.message?.trim() || null,
-        notes: data.notes?.trim() || null,
+        email: optionalTrimmedUpdate(data.email),
+        city: optionalTrimmedUpdate(data.city),
+        language: optionalTrimmedUpdate(data.language),
+        address: optionalTrimmedUpdate(data.address),
+        ownershipType: optionalTrimmedUpdate(data.ownershipType),
+        locationSent: data.locationSent === undefined ? undefined : Boolean(data.locationSent),
+        message: optionalTrimmedUpdate(data.message),
+        notes: optionalTrimmedUpdate(data.notes),
         lastContactedAt: new Date(),
       },
       create: {
@@ -443,8 +559,30 @@ export async function createManualCallLeadAction(data: {
       });
     }
 
-    // Auto-queue WhatsApp message for this lead
-    await autoQueueWhatsAppForCaller(lead.phone, displayName, "MISSED");
+    // Route the manual automation through the same company phone as the most
+    // recent call session. If there is no session, the automation is skipped
+    // rather than guessing a sender.
+    const routingSession = await db.callSession.findFirst({
+      where: { leadId: lead.id, deletedAt: null, isArchived: false },
+      orderBy: { firstRingAt: "desc" },
+      select: { companyPhoneId: true },
+    });
+    await autoQueueWhatsAppForCaller(
+      lead.phone,
+      displayName,
+      "MISSED",
+      lead.id,
+      routingSession?.companyPhoneId,
+    );
+
+    // Auto-assign new lead via round-robin / load-balanced distribution
+    if (!existingLead && !lead.assignedToId && lead.organizationId) {
+      try {
+        await autoAssignCallLead(lead.id, lead.organizationId);
+      } catch (err) {
+        console.error("Auto-distribution failed for lead", lead.id, err);
+      }
+    }
 
     revalidateCallViews();
     revalidatePath("/admin/whatsapp/leads");
@@ -527,8 +665,8 @@ export async function updateCallLeadWorkflowAction(
     const assignedToId = data.assignedToId?.trim() || null;
 
     if (assignedToId) {
-      const assignee = await db.user.findUnique({
-        where: { id: assignedToId },
+      const assignee = await db.user.findFirst({
+        where: { id: assignedToId, isActive: true },
         select: { id: true, username: true },
       });
 
@@ -585,6 +723,21 @@ export async function updateCallLeadWorkflowAction(
           : `Call lead status updated to ${data.status}`,
       },
     });
+
+    // Record SLA response when lead transitions out of NEW via workflow update
+    if (currentLead && data.status !== "NEW") {
+      const prevLead = await db.callLead.findUnique({
+        where: { id: leadId },
+        select: { firstResponseAt: true },
+      });
+      if (prevLead && !prevLead.firstResponseAt) {
+        try {
+          await recordLeadResponse(leadId, user.id);
+        } catch (err) {
+          console.error("recordLeadResponse failed for lead", leadId, err);
+        }
+      }
+    }
 
     revalidateCallViews();
     return { success: true };
@@ -663,6 +816,7 @@ export async function saveCallLeadToSheetAction(leadId: string) {
       lastCallDirection: latestDurationSession?.callDirection || null,
       lastCallDurationSeconds: latestDurationSession?.durationSeconds || null,
       updatedAt: callLead.updatedAt,
+      organizationId: callLead.organizationId,
     });
 
     await db.callLead.update({
@@ -743,6 +897,7 @@ export async function syncCallLeadToSheetBackground(leadId: string) {
       lastCallDirection: latestDurationSession?.callDirection || null,
       lastCallDurationSeconds: latestDurationSession?.durationSeconds || null,
       updatedAt: callLead.updatedAt,
+      organizationId: callLead.organizationId,
     });
 
     await db.callLead.update({
@@ -768,4 +923,3 @@ export async function syncCallLeadToSheetBackground(leadId: string) {
     console.error("[sheet-sync-bg] Background sheet sync failed:", error);
   }
 }
-

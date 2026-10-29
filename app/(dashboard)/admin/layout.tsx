@@ -1,13 +1,31 @@
 import type { ReactNode } from "react";
-import { requireRole } from "@/app/lib/session";
+import { requireOrgUser } from "@/app/lib/org-session";
+import { db } from "@/app/lib/db";
 import { AdminShell } from "./components/admin-shell";
+
+export const dynamic = "force-dynamic";
 
 export default async function AdminLayout({
   children,
 }: Readonly<{
   children: ReactNode;
 }>) {
-  const user = await requireRole("ADMIN");
+  const { user, org, orgRole } = await requireOrgUser();
 
-  return <AdminShell user={user}>{children}</AdminShell>;
+  // Fetch the current user's availability status for the header pill
+  const membership = await db.orgMember.findFirst({
+    where: { organizationId: org.id, userId: user.id },
+    select: { availabilityStatus: true },
+  });
+
+  return (
+    <AdminShell
+      user={user}
+      org={org}
+      orgRole={orgRole}
+      availabilityStatus={(membership?.availabilityStatus as "ONLINE" | "BUSY" | "OFFLINE") || "ONLINE"}
+    >
+      {children}
+    </AdminShell>
+  );
 }

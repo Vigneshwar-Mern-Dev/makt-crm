@@ -51,8 +51,8 @@ const navItems = [
     ),
     children: [
       { href: "/user/calls", label: "Overview" },
-      { href: "/user/calls/callbacks", label: "Open Leads" },
-      { href: "/user/calls/assigned", label: "Assigned" },
+      { href: "/user/calls/callbacks", label: "Open Leads & Queue" },
+      { href: "/user/calls/assigned", label: "My Assigned Leads" },
     ],
   },
 ];

@@ -1,4 +1,5 @@
 import { db } from "@/app/lib/db";
+import { requireOrgRole } from "@/app/lib/org-session";
 import { CallLeadStatus, TaskPriority, TaskStatus } from "@/app/lib/prisma-enums";
 import {
   DailyCallsChart,
@@ -47,7 +48,7 @@ function last14Days() {
 
 type AnalyticsPageProps = { searchParams: Promise<{ range?: string }> };
 
-async function getAnalyticsData(since?: Date) {
+async function getAnalyticsData(orgId: string, since?: Date) {
   const createdAtFilter = since ? { gte: since } : undefined;
   const days = last14Days();
   const start14 = new Date(); start14.setDate(start14.getDate() - 13); start14.setHours(0,0,0,0);
@@ -59,22 +60,23 @@ async function getAnalyticsData(since?: Date) {
       callSessions14, waSent14, waReplied14, tasks14,
       topCities, propertyTypes, agentCallStats, agentCompletedTasks, locationSentCount,
     ] = await Promise.all([
-      db.task.groupBy({ by: ["status"], _count: { _all: true }, where: createdAtFilter ? { createdAt: createdAtFilter } : undefined }),
-      db.task.groupBy({ by: ["priority"], _count: { _all: true }, where: createdAtFilter ? { createdAt: createdAtFilter } : undefined }),
-      db.task.count({ where: { dueDate: { lt: new Date() }, status: { notIn: [TaskStatus.COMPLETED, TaskStatus.CANCELLED] } } }),
-      db.callLead.groupBy({ by: ["status"], _count: { _all: true }, where: createdAtFilter ? { createdAt: createdAtFilter } : undefined }),
-      db.callFollowUp.count({ where: { completedAt: null } }),
-      db.user.findMany({ orderBy: { username: "asc" }, select: { id: true, username: true, role: true, _count: { select: { assignedTasks: true, callLeads: true, callFollowUps: true } } } }),
+      db.task.groupBy({ by: ["status"], _count: { _all: true }, where: { organizationId: orgId, ...(createdAtFilter ? { createdAt: createdAtFilter } : {}) } }),
+      db.task.groupBy({ by: ["priority"], _count: { _all: true }, where: { organizationId: orgId, ...(createdAtFilter ? { createdAt: createdAtFilter } : {}) } }),
+      db.task.count({ where: { organizationId: orgId, dueDate: { lt: new Date() }, status: { notIn: [TaskStatus.COMPLETED, TaskStatus.CANCELLED] } } }),
+      db.callLead.groupBy({ by: ["status"], _count: { _all: true }, where: { organizationId: orgId, ...(createdAtFilter ? { createdAt: createdAtFilter } : {}) } }),
+      db.callFollowUp.count({ where: { lead: { organizationId: orgId }, completedAt: null } }),
+      db.user.findMany({ where: { organizationId: orgId, isActive: true }, orderBy: { username: "asc" }, select: { id: true, username: true, role: true, _count: { select: { assignedTasks: true, callLeads: true, callFollowUps: true } } } }),
       // Raw daily data for charts
-      db.callSession.findMany({ where: { firstRingAt: { gte: start14 } }, select: { firstRingAt: true, callDirection: true } }),
-      db.whatsAppLead.findMany({ where: { lastSentAt: { gte: start14 } }, select: { lastSentAt: true } }),
-      db.whatsAppLead.findMany({ where: { lastReplyAt: { gte: start14 } }, select: { lastReplyAt: true } }),
-      db.task.findMany({ where: { createdAt: { gte: start14 } }, select: { createdAt: true, status: true, updatedAt: true } }),
+      db.callSession.findMany({ where: { organizationId: orgId, firstRingAt: { gte: start14 } }, select: { firstRingAt: true, callDirection: true } }),
+      db.whatsAppLead.findMany({ where: { organizationId: orgId, lastSentAt: { gte: start14 } }, select: { lastSentAt: true } }),
+      db.whatsAppLead.findMany({ where: { organizationId: orgId, lastReplyAt: { gte: start14 } }, select: { lastReplyAt: true } }),
+      db.task.findMany({ where: { organizationId: orgId, createdAt: { gte: start14 } }, select: { createdAt: true, status: true, updatedAt: true } }),
       // Lead Demographics & Stats
       db.callLead.groupBy({
         by: ["city"],
         _count: { _all: true },
         where: {
+          organizationId: orgId,
           NOT: [
             { city: null },
             { city: "" }
@@ -88,6 +90,7 @@ async function getAnalyticsData(since?: Date) {
         by: ["ownershipType"],
         _count: { _all: true },
         where: {
+          organizationId: orgId,
           NOT: [
             { ownershipType: null },
             { ownershipType: "" }
@@ -101,6 +104,7 @@ async function getAnalyticsData(since?: Date) {
         _count: { _all: true },
         _sum: { durationSeconds: true },
         where: {
+          organizationId: orgId,
           status: { in: ["ANSWERED", "COMPLETED"] },
           firstRingAt: createdAtFilter ? { gte: since } : undefined,
         },
@@ -109,6 +113,7 @@ async function getAnalyticsData(since?: Date) {
         by: ["assignedToId"],
         _count: { _all: true },
         where: {
+          organizationId: orgId,
           status: "COMPLETED",
           createdAt: createdAtFilter ? { gte: since } : undefined,
         },
@@ -116,6 +121,7 @@ async function getAnalyticsData(since?: Date) {
       // Location link sent rate
       db.callLead.count({
         where: {
+          organizationId: orgId,
           locationSent: true,
           createdAt: createdAtFilter ? { gte: since } : undefined,
         },
@@ -219,18 +225,19 @@ function formatDuration(seconds: number | null) {
 }
 
 export default async function AdminAnalyticsPage({ searchParams }: AnalyticsPageProps) {
+  const { org } = await requireOrgRole("ADMIN");
   const params = await searchParams;
   const range: Range = (params.range === "week" || params.range === "month" || params.range === "3day" || params.range === "today") ? params.range : "all";
   const since = getDateRange(range);
-  const { data, error } = await getAnalyticsData(since);
+  const { data, error } = await getAnalyticsData(org.id, since);
 
-  const taskCounts = Object.fromEntries(taskStatuses.map((s) => [s, data.taskStatusCounts.find((r) => r.status === s)?._count._all ?? 0])) as Record<TaskStatus, number>;
-  const callCounts = Object.fromEntries(callLeadStatuses.map((s) => [s, data.callLeadStatusCounts.find((r) => r.status === s)?._count._all ?? 0])) as Record<CallLeadStatus, number>;
+  const taskCounts = Object.fromEntries(taskStatuses.map((s) => [s, data.taskStatusCounts.find((r: { status: string; _count: { _all: number } }) => r.status === s)?._count._all ?? 0])) as Record<TaskStatus, number>;
+  const callCounts = Object.fromEntries(callLeadStatuses.map((s) => [s, data.callLeadStatusCounts.find((r: { status: string; _count: { _all: number } }) => r.status === s)?._count._all ?? 0])) as Record<CallLeadStatus, number>;
   const totalTasks = Object.values(taskCounts).reduce((a, b) => a + b, 0);
   const totalCallLeads = Object.values(callCounts).reduce((a, b) => a + b, 0);
   const openTasks = taskCounts.PENDING + taskCounts.IN_PROGRESS;
   const openCallLeads = callCounts.NEW + callCounts.CONTACTED + callCounts.FOLLOW_UP + callCounts.INTERESTED + callCounts.NO_RESPONSE;
-  const urgentTasks = (data.taskPriorityCounts.find((r) => r.priority === TaskPriority.URGENT)?._count._all ?? 0) + (data.taskPriorityCounts.find((r) => r.priority === TaskPriority.HIGH)?._count._all ?? 0);
+  const urgentTasks = (data.taskPriorityCounts.find((r: { priority: string; _count: { _all: number } }) => r.priority === TaskPriority.URGENT)?._count._all ?? 0) + (data.taskPriorityCounts.find((r: { priority: string; _count: { _all: number } }) => r.priority === TaskPriority.HIGH)?._count._all ?? 0);
 
   const donutData: StatusPoint[] = callLeadStatuses.map((s) => ({ name: label(s), value: callCounts[s], color: STATUS_COLORS[s] ?? "#64748b" })).filter((d) => d.value > 0);
 
@@ -362,7 +369,7 @@ export default async function AdminAnalyticsPage({ searchParams }: AnalyticsPage
             <div>
               <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-400 mb-2">Top Cities</p>
               <div className="space-y-2">
-                {data.topCities.map((c) => (
+                {data.topCities.map((c: { city: string | null; _count: { _all: number } }) => (
                   <div key={c.city || "unknown"} className="flex items-center justify-between text-xs py-1 border-b border-white/5">
                     <span className="text-slate-300 font-medium truncate max-w-[120px]">{c.city || "Unknown"}</span>
                     <span className="font-bold text-white bg-white/5 px-2 py-0.5 rounded">{formatNumber(c._count._all)}</span>
@@ -374,7 +381,7 @@ export default async function AdminAnalyticsPage({ searchParams }: AnalyticsPage
             <div>
               <p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-400 mb-2">Property Types</p>
               <div className="space-y-2">
-                {data.propertyTypes.map((p) => (
+                {data.propertyTypes.map((p: { ownershipType: string | null; _count: { _all: number } }) => (
                   <div key={p.ownershipType || "unknown"} className="flex items-center justify-between text-xs py-1 border-b border-white/5">
                     <span className="text-slate-300 font-medium capitalize truncate max-w-[120px]">{(p.ownershipType || "").toLowerCase()}</span>
                     <span className="font-bold text-white bg-white/5 px-2 py-0.5 rounded">{formatNumber(p._count._all)}</span>
@@ -401,9 +408,9 @@ export default async function AdminAnalyticsPage({ searchParams }: AnalyticsPage
               </tr>
             </thead>
             <tbody className="divide-y divide-white/10">
-              {data.users.map((u) => {
-                const completedCount = data.agentCompletedTasks.find((t) => t.assignedToId === u.id)?._count._all ?? 0;
-                const callStat = data.agentCallStats.find((c) => c.assignedToId === u.id);
+              {data.users.map((u: { id: string; username: string; role: string; _count: { assignedTasks: number; callLeads: number; callFollowUps: number } }) => {
+                const completedCount = data.agentCompletedTasks.find((t: { assignedToId: string; _count: { _all: number } }) => t.assignedToId === u.id)?._count._all ?? 0;
+                const callStat = data.agentCallStats.find((c: { assignedToId: string | null; _count: { _all: number }; _sum: { durationSeconds: number | null } }) => c.assignedToId === u.id);
                 const callsAttended = callStat?._count._all ?? 0;
                 const talkTimeSeconds = callStat?._sum.durationSeconds ?? 0;
 

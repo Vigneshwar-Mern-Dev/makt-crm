@@ -1,8 +1,10 @@
 import { db } from "@/app/lib/db";
 import { expireStaleRingingCalls } from "@/app/lib/call-session-maintenance";
+import { requireOrgUser } from "@/app/lib/org-session";
 import { CallbacksPage } from "./callbacks-page";
 
 export default async function AdminMissedCallsPage() {
+  const { org } = await requireOrgUser();
   await expireStaleRingingCalls();
 
   const terminalLeadStatuses = ["CONVERTED", "CLOSED", "NOT_INTERESTED"] as const;
@@ -26,7 +28,7 @@ export default async function AdminMissedCallsPage() {
   };
   const [activeCalls, calls, agents] = await Promise.all([
     db.callSession.findMany({
-      where: { status: { in: ["RINGING", "ANSWERED"] }, endedAt: null },
+      where: { organizationId: org.id, status: { in: ["RINGING", "ANSWERED"] }, endedAt: null },
       include: {
         companyPhone: { select: { label: true, phoneNumber: true } },
         lead: { select: leadSelect },
@@ -36,7 +38,7 @@ export default async function AdminMissedCallsPage() {
       take: 25,
     }),
     db.callSession.findMany({
-      where: { status: "MISSED", lead: { status: { notIn: [...terminalLeadStatuses] } } },
+      where: { organizationId: org.id, status: "MISSED", lead: { status: { notIn: [...terminalLeadStatuses] } } },
       include: {
         companyPhone: { select: { label: true, phoneNumber: true } },
         lead: { select: leadSelect },
@@ -46,7 +48,7 @@ export default async function AdminMissedCallsPage() {
       take: 100,
     }),
     db.user.findMany({
-      where: { role: "USER" },
+      where: { organizationId: org.id, isActive: true },
       select: { id: true, username: true, email: true, department: true },
       orderBy: { username: "asc" },
     }),

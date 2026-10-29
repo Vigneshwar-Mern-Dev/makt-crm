@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { db } from "./db";
 import { TaskPriority, TaskStatus } from "./prisma-enums";
-import { requireRole, requireUser } from "./session";
+import { requireOrgRole, requireOrgUser } from "./org-session";
 
 function formValue(formData: FormData, key: string) {
   const value = formData.get(key);
@@ -50,25 +50,25 @@ function taskRedirectPath(role: string) {
 }
 
 async function requireTaskAccess(taskId: string) {
-  const user = await requireUser();
-  const task = await db.task.findUnique({
-    where: { id: taskId },
+  const { user, org, orgRole } = await requireOrgUser();
+  const task = await db.task.findFirst({
+    where: { id: taskId, organizationId: org.id },
     select: { id: true, assignedToId: true },
   });
 
   if (!task) {
-    redirectWithError(taskRedirectPath(user.role), "Task not found.");
+    redirectWithError(taskRedirectPath(orgRole === "MEMBER" ? "USER" : "ADMIN"), "Task not found.");
   }
 
-  if (user.role !== "ADMIN" && task.assignedToId !== user.id) {
+  if (orgRole === "MEMBER" && task.assignedToId !== user.id) {
     redirectWithError("/user/tasks", "You can only update tasks assigned to you.");
   }
 
-  return user;
+  return { user, orgRole };
 }
 
 export async function createTaskAction(formData: FormData) {
-  const admin = await requireRole("ADMIN");
+  const { org, user: admin } = await requireOrgRole("ADMIN");
   const title = formValue(formData, "title");
   const description = optionalFormValue(formData, "description");
   const assignedToId = formValue(formData, "assignedToId");
@@ -80,8 +80,8 @@ export async function createTaskAction(formData: FormData) {
     redirectWithError("/admin/tasks", "Task title and assigned user are required.");
   }
 
-  const assignedUser = await db.user.findUnique({
-    where: { id: assignedToId },
+  const assignedUser = await db.user.findFirst({
+    where: { id: assignedToId, organizationId: org.id, isActive: true },
     select: { id: true },
   });
 
@@ -91,6 +91,7 @@ export async function createTaskAction(formData: FormData) {
 
   await db.task.create({
     data: {
+      organizationId: org.id,
       title,
       description,
       assignedToId,
@@ -107,7 +108,7 @@ export async function createTaskAction(formData: FormData) {
 }
 
 export async function updateTaskAction(formData: FormData) {
-  await requireRole("ADMIN");
+  const { org } = await requireOrgRole("ADMIN");
 
   const taskId = formValue(formData, "taskId");
   const title = formValue(formData, "title");
@@ -115,6 +116,23 @@ export async function updateTaskAction(formData: FormData) {
 
   if (!taskId || !title || !assignedToId) {
     redirectWithError("/admin/tasks", "Task, title, and assigned user are required.");
+  }
+
+  const existingTask = await db.task.findFirst({
+    where: { id: taskId, organizationId: org.id },
+  });
+
+  if (!existingTask) {
+    redirectWithError("/admin/tasks", "Task not found.");
+  }
+
+  const assignedUser = await db.user.findFirst({
+    where: { id: assignedToId, organizationId: org.id, isActive: true },
+    select: { id: true },
+  });
+
+  if (!assignedUser) {
+    redirectWithError("/admin/tasks", "Assigned user does not exist or is inactive.");
   }
 
   await db.task.update({
@@ -135,12 +153,20 @@ export async function updateTaskAction(formData: FormData) {
 }
 
 export async function deleteTaskAction(formData: FormData) {
-  await requireRole("ADMIN");
+  const { org } = await requireOrgRole("ADMIN");
 
   const taskId = formValue(formData, "taskId");
 
   if (!taskId) {
     redirectWithError("/admin/tasks", "Task id is required.");
+  }
+
+  const existingTask = await db.task.findFirst({
+    where: { id: taskId, organizationId: org.id },
+  });
+
+  if (!existingTask) {
+    redirectWithError("/admin/tasks", "Task not found.");
   }
 
   await db.task.delete({ where: { id: taskId } });
@@ -158,7 +184,7 @@ export async function changeTaskStatusAction(formData: FormData) {
     redirectWithError("/user/tasks", "Task id is required.");
   }
 
-  const user = await requireTaskAccess(taskId);
+  const { orgRole } = await requireTaskAccess(taskId);
 
   await db.task.update({
     where: { id: taskId },
@@ -167,7 +193,7 @@ export async function changeTaskStatusAction(formData: FormData) {
 
   revalidatePath("/admin/tasks");
   revalidatePath("/user/tasks");
-  redirect(`${taskRedirectPath(user.role)}?statusUpdated=1`);
+  redirect(`${taskRedirectPath(orgRole === "MEMBER" ? "USER" : "ADMIN")}?statusUpdated=1`);
 }
 
 export async function addTaskCommentAction(formData: FormData) {
@@ -178,7 +204,7 @@ export async function addTaskCommentAction(formData: FormData) {
     redirectWithError("/user/tasks", "Task and note are required.");
   }
 
-  const user = await requireTaskAccess(taskId);
+  const { user, orgRole } = await requireTaskAccess(taskId);
 
   await db.taskComment.create({
     data: {
@@ -190,5 +216,5 @@ export async function addTaskCommentAction(formData: FormData) {
 
   revalidatePath("/admin/tasks");
   revalidatePath("/user/tasks");
-  redirect(`${taskRedirectPath(user.role)}?commented=1`);
+  redirect(`${taskRedirectPath(orgRole === "MEMBER" ? "USER" : "ADMIN")}?commented=1`);
 }

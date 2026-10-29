@@ -1,141 +1,120 @@
 import "server-only";
 
 import { db } from "./db";
-import { generateUniqueFormToken } from "./short-token";
+import { queueWhatsAppMessage } from "./whatsapp-lifecycle";
+import { pickWhatsAppAccount, pickWhatsAppAccountForCall } from "./whatsapp-account-picker";
 
-const ANSWERED_TEMPLATE = `Hi {{name}}!
+const ANSWERED_TEMPLATE = `{Hi|Hello|வணக்கம்} {{name}}! 🙏
 
-Thank you for your inquiry about the ATM Franchise! It was great speaking with you today. Taking the step to start your own franchise is a fantastic start toward building a reliable, passive income source and achieving financial freedom! 🚀
+{Thank you for your inquiry about the ATM Franchise.|ATM Franchise-ஐ தொடர்பு கொண்டதற்கு நன்றி.|MAKT ATM Franchise பற்றி விசாரித்தமைக்கு நன்றி.} {It was good speaking with you today.|உங்களுடன் பேசியதில் மகிழ்ச்சி.}
 
-Please fill out your details quickly using this secure link so we can finalize the next steps:
-👉 {{formLink}}
+{Please fill out your details using this secure link so we can finalize the next steps:|உங்கள் விவரங்களை இந்த பாதுகாப்பான லிங்க் மூலம் பூர்த்தி செய்யுங்கள்:|கீழே உள்ள லிங்கில் உங்கள் விவரங்களை பதிவு செய்யவும்:}
+{{formLink}}
 
-Our team will review your details and contact you shortly.
+{Our team will review your details and contact you shortly.|எங்கள் குழு உங்கள் விவரங்களை ஆய்வு செய்து விரைவில் உங்களைத் தொடர்பு கொள்ளும்.|எங்கள் அணி விரைவில் முழு விவரங்களுடன் உங்களை அழைக்கும்.}
 
-Thank you,
+{Thank you,|நன்றி! 🙏|Warm regards,}
 ATM Franchise Team`;
 
-const MISSED_TEMPLATE = `Hi {{name}}!
+const MISSED_TEMPLATE = `{Hi|Hello|வணக்கம்} {{name}}! 🙏
 
-We are from ATM Franchise. Apologies for the delay in responding. We are currently receiving a high volume of inquiries.
+{We are from ATM Franchise.|நாங்கள் ATM Franchise குழுவிலிருந்து தொடர்பு கொள்கிறோம்.} {Apologies for missing your call.|பதில் அளிக்க இயலாததற்கு மன்னிக்கவும்.} {We are currently receiving a high volume of inquiries.|தற்போது அதிக அழைப்புகள் வருவதால் தாமதம் ஏற்பட்டுள்ளது.}
 
-Please fill out your details quickly using this secure link:
-👉 {{formLink}}
+{Please fill out your details using this secure link:|உங்கள் தகவல்களை இந்த லிங்க் மூலம் பதிவு செய்யவும்:|கீழே உள்ள பாதுகாப்பான லிங்கில் விவரங்களை பூர்த்தி செய்யவும்:}
+{{formLink}}
 
-Our team will contact you and provide complete information.
+{Our team will contact you and provide complete information.|எங்கள் குழு உங்களை உடனடியாக தொடர்பு கொண்டு முழு விவரங்களை வழங்கும்.}
 
-Thank you!
+{Thank you,|நன்றி! 🙏|With regards,}
 ATM Franchise Team`;
 
-/**
- * Auto-queue a WhatsApp outbound message for an incoming caller.
- *
- * Rules:
- *  - Skips if autoReplyEnabled = false.
- *  - Skips if account status is PAUSED / DISCONNECTED / ERROR.
- *  - Per-contact cooldown: skips if the lead was already SENT or REPLIED
- *    within `contactCooldownDays` days (prevents re-spamming repeat callers).
- *  - DO_NOT_CONTACT → skips forever.
- *  - QUEUED → already pending, skip.
- *  - REPLIED → treat same as SENT (respect cooldown, don't re-queue if active).
- *  - NEW / FAILED / OPTED_IN → re-queue.
- *  - No lead found → create new QUEUED lead.
- */
 export async function autoQueueWhatsAppForCaller(
   callerPhone: string,
   displayName: string,
   callState: "ANSWERED" | "MISSED",
+  callLeadId?: string,
+  companyPhoneId?: string,
+  organizationId?: string,
 ): Promise<void> {
   try {
-    const account = await db.whatsAppAccount.findFirst({
-      orderBy: { createdAt: "asc" },
-      select: {
-        id: true,
-        autoReplyEnabled: true,
-        status: true,
-        contactCooldownDays: true,
-      },
-    });
+    const picked = companyPhoneId
+      ? await pickWhatsAppAccountForCall(companyPhoneId, callerPhone)
+      : await pickWhatsAppAccount(callerPhone);
 
-    if (!account) return;
-
-    if (!account.autoReplyEnabled) return;
-
-
-
-    const existing = await db.whatsAppLead.findFirst({
-      where: { phone: callerPhone },
-      select: { id: true, status: true, lastSentAt: true, lastReplyAt: true },
-    });
-
-    if (existing) {
-      // Never contact again
-      if (existing.status === "DO_NOT_CONTACT") {
-        console.log(`[whatsapp-auto-queue] Skipping ${callerPhone} — DO_NOT_CONTACT.`);
-        return;
-      }
-
-      // Already waiting in queue
-      if (existing.status === "QUEUED") {
-        console.log(`[whatsapp-auto-queue] Skipping ${callerPhone} — already QUEUED.`);
-        return;
-      }
-
-      // Check per-contact cooldown for SENT and REPLIED leads
-      if (existing.status === "SENT" || existing.status === "REPLIED") {
-        const lastContactDate = existing.lastReplyAt ?? existing.lastSentAt;
-
-        if (lastContactDate && account.contactCooldownDays > 0) {
-          const cooldownMs = account.contactCooldownDays * 24 * 60 * 60 * 1000;
-          const timeSinceContact = Date.now() - lastContactDate.getTime();
-
-          if (timeSinceContact < cooldownMs) {
-            const hoursLeft = Math.ceil((cooldownMs - timeSinceContact) / (60 * 60 * 1000));
-            console.log(
-              `[whatsapp-auto-queue] Skipping ${callerPhone} — cooldown active, ${hoursLeft}h remaining.`,
-            );
-            return;
-          }
-        }
-      }
-
-      // Re-queue leads that are eligible (NEW, FAILED, OPTED_IN, or past-cooldown SENT/REPLIED)
-      const selectedMessage = callState === "ANSWERED" ? ANSWERED_TEMPLATE : MISSED_TEMPLATE;
-      await db.whatsAppLead.update({
-        where: { id: existing.id },
-        data: {
-          status: "QUEUED",
-          displayName,
-          message: selectedMessage,
-          lastError: null,
-          consentAt: new Date(),
-        },
-      });
-
+    if (!picked) {
       console.log(
-        `[whatsapp-auto-queue] Re-queued ${callerPhone} (was ${existing.status}).`,
+        "[whatsapp-auto-queue] No enabled account for " + callerPhone +
+          (companyPhoneId ? ". Map the company phone or enable auto-reply." : ". No available WhatsApp accounts."),
       );
       return;
     }
 
-    // Brand-new caller — create QUEUED lead; no explicit message so worker picks a variant
-    const formToken = await generateUniqueFormToken();
-    const selectedMessage = callState === "ANSWERED" ? ANSWERED_TEMPLATE : MISSED_TEMPLATE;
-    await db.whatsAppLead.create({
-      data: {
-        accountId: account.id,
-        phone: callerPhone,
-        displayName,
-        message: selectedMessage,
-        status: "QUEUED",
-        consentAt: new Date(), // caller initiated contact by calling us
-        formToken,
+    // Fetch account-level settings for cooldown check
+    const account = await db.whatsAppAccount.findUnique({
+      where: { id: picked.accountId },
+      select: {
+        id: true,
+        autoReplyEnabled: true,
+        contactCooldownDays: true,
       },
     });
 
-    console.log(
-      `[whatsapp-auto-queue] Queued new WhatsApp message for incoming caller ${callerPhone}.`,
-    );
+    if (!account?.autoReplyEnabled) {
+      return;
+    }
+
+    const existing = await db.whatsAppLead.findFirst({
+      where: { phone: callerPhone, deletedAt: null },
+      select: { id: true, status: true, lastSentAt: true, lastReplyAt: true },
+    });
+
+    if (existing?.status === "DO_NOT_CONTACT") {
+      console.log(`[whatsapp-auto-queue] Skipping ${callerPhone}: DO_NOT_CONTACT.`);
+      return;
+    }
+
+    if (existing?.status === "SENT" || existing?.status === "REPLIED") {
+      const lastContactDate = existing.lastReplyAt ?? existing.lastSentAt;
+
+      if (lastContactDate && account.contactCooldownDays > 0) {
+        const cooldownMs = account.contactCooldownDays * 24 * 60 * 60 * 1000;
+        const timeSinceContact = Date.now() - lastContactDate.getTime();
+
+        if (timeSinceContact < cooldownMs) {
+          const hoursLeft = Math.ceil((cooldownMs - timeSinceContact) / (60 * 60 * 1000));
+          console.log(
+            `[whatsapp-auto-queue] Skipping ${callerPhone}: cooldown active, ${hoursLeft}h remaining.`,
+          );
+          return;
+        }
+      }
+    }
+
+    const selectedMessage = callState === "ANSWERED" ? ANSWERED_TEMPLATE : MISSED_TEMPLATE;
+    const result = await queueWhatsAppMessage({
+      accountId: account.id,
+      phone: callerPhone,
+      displayName,
+      message: selectedMessage,
+      consentAt: new Date(),
+      callLeadId,
+      organizationId,
+      source: `auto_${callState.toLowerCase()}`,
+      routingReason: picked.reason,
+      routingWarning: picked.warning,
+    });
+
+    if (result.queued) {
+      console.log(
+        "[whatsapp-auto-queue] Queued WhatsApp for " + callerPhone +
+          " (account=" + account.id + ", callLead=" + (callLeadId ?? "none") +
+          ", queueItem=" + result.queueItemId + ", deferred=" + Boolean(picked.deferred) + ").",
+      );
+    } else {
+      console.log(
+        `[whatsapp-auto-queue] Skipped ${callerPhone}: ${result.reason} (callLead=${callLeadId ?? "none"}).`,
+      );
+    }
   } catch (error) {
     console.error("[whatsapp-auto-queue] Failed to queue WhatsApp message:", error);
   }
