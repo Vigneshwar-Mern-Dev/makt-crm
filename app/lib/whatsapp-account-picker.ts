@@ -204,7 +204,36 @@ export async function pickWhatsAppAccount(
   if (eligible.length === 0) {
     const reasons = accountsWithStats.map((a) => `${a.label}: ${isAccountEligible(a).reason}`);
     console.warn(`[account-picker] No eligible accounts for ${leadPhone}. ${reasons.join(", ")}`);
-    return null;
+
+    // Fall back to a deferred account so new incoming leads are queued rather than permanently lost
+    const fallbackAccounts = await db.whatsAppAccount.findMany({
+      where: {
+        autoReplyEnabled: true,
+        status: { notIn: ["PAUSED", "ERROR"] },
+      },
+      select: { id: true, label: true, lastAssignedAt: true, createdAt: true },
+    });
+
+    const fallback = chooseDeferredWhatsAppAccount(
+      fallbackAccounts,
+      existingLead?.preferredAccountId,
+    );
+    if (!fallback) return null;
+
+    await db.whatsAppAccount.update({
+      where: { id: fallback.id },
+      data: { lastAssignedAt: now },
+    });
+
+    console.warn(
+      `[account-picker] Queueing ${leadPhone} on ${fallback.label} until a worker is connected.`,
+    );
+
+    return {
+      accountId: fallback.id,
+      reason: "deferred fallback: " + fallback.label,
+      deferred: true,
+    };
   }
 
   // Sort by least-loaded (fewest active queue items), then by lastAssignedAt ascending (oldest first)

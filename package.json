@@ -28,6 +28,7 @@
     "whatsapp:workers": "node scripts/whatsapp-worker-manager.mjs",
     "whatsapp:workers:check": "node scripts/whatsapp-worker-manager.mjs --check",
     "queue:reset-stuck": "node scripts/reset-stuck-queue.mjs",
+    "whatsapp:queue-existing": "node scripts/queue-whatsapp-for-existing-leads.mjs",
     "cleanup:login-attempts": "node scripts/cleanup-login-attempts.mjs",
     "cleanup:security": "node scripts/cleanup-login-attempts.mjs",
     "leads:reconcile-submitted": "node scripts/reconcile-submitted-leads.mjs",
