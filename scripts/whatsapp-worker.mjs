@@ -498,6 +498,13 @@ async function startAdaptiveOutboxLoop() {
   }
 }
 
+// Send regular heartbeat every 30 seconds while connected
+setInterval(async () => {
+  if (ready) {
+    await postBridge({ status: "CONNECTED", heartbeatOnly: true }).catch(() => {});
+  }
+}, 30000);
+
 startAdaptiveOutboxLoop();
 
 process.on("SIGINT", async () => {

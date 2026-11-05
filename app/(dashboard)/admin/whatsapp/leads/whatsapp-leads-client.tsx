@@ -261,6 +261,42 @@ export function WhatsAppLeadsClient({
   activeTab: string;
   tabCounts: TabCounts;
 }) {
+  const [currentAccountHealth, setCurrentAccountHealth] = useState(accountHealth);
+  const [dismissedWarnings, setDismissedWarnings] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setCurrentAccountHealth(accountHealth);
+  }, [accountHealth]);
+
+  // Real-time status polling so the connection banner reflects live state without full reloads
+  useEffect(() => {
+    let active = true;
+    async function checkLiveStatus() {
+      try {
+        const res = await fetch("/api/whatsapp/status");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!active || !data) return;
+
+        if (data.status) {
+          setCurrentAccountHealth((prev) =>
+            prev.map((acc) => ({
+              ...acc,
+              status: data.status,
+              autoReplyEnabled: data.autoReplyEnabled ?? acc.autoReplyEnabled,
+            }))
+          );
+        }
+      } catch {}
+    }
+
+    const interval = setInterval(checkLiveStatus, 4000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   const [showRetryConfirm, setShowRetryConfirm] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [retryResult, setRetryResult] = useState<RetryFailedLeadsResult | null>(null);
@@ -357,18 +393,36 @@ export function WhatsAppLeadsClient({
         </a>
       </header>
 
-      {accountHealth.some((account) => account.status !== "CONNECTED" || !account.autoReplyEnabled) && (
+      {currentAccountHealth.some((account) => (account.status !== "CONNECTED" || !account.autoReplyEnabled) && !dismissedWarnings[account.id]) && (
         <div className="flex flex-col gap-3">
-          {accountHealth.filter((account) => account.status !== "CONNECTED").map((account) => (
-            <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3" key={`offline-${account.id}`}>
-              <p className="text-sm font-semibold text-red-200">{account.label}: device not connected</p>
-              <p className="mt-0.5 text-xs text-red-300/70">Worker status is {account.status}. Only this account&apos;s queue is blocked.</p>
+          {currentAccountHealth.filter((account) => account.status !== "CONNECTED" && !dismissedWarnings[account.id]).map((account) => (
+            <div className="flex items-center justify-between rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3" key={`offline-${account.id}`}>
+              <div>
+                <p className="text-sm font-semibold text-red-200">{account.label}: device not connected</p>
+                <p className="mt-0.5 text-xs text-red-300/70">Worker status is {account.status}. Only this account&apos;s queue is blocked.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDismissedWarnings((prev) => ({ ...prev, [account.id]: true }))}
+                className="rounded border border-red-400/20 px-2.5 py-1 text-[11px] font-semibold text-red-300/80 transition hover:bg-red-500/20 hover:text-red-100"
+              >
+                Dismiss
+              </button>
             </div>
           ))}
-          {accountHealth.filter((account) => !account.autoReplyEnabled).map((account) => (
-            <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3" key={`paused-${account.id}`}>
-              <p className="text-sm font-semibold text-amber-200">{account.label}: sending is paused</p>
-              <p className="mt-0.5 text-xs text-amber-300/70">Its queue is retained, but it will not dispatch until an admin resumes it.</p>
+          {currentAccountHealth.filter((account) => !account.autoReplyEnabled && !dismissedWarnings[account.id]).map((account) => (
+            <div className="flex items-center justify-between rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3" key={`paused-${account.id}`}>
+              <div>
+                <p className="text-sm font-semibold text-amber-200">{account.label}: sending is paused</p>
+                <p className="mt-0.5 text-xs text-amber-300/70">Its queue is retained, but it will not dispatch until an admin resumes it.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDismissedWarnings((prev) => ({ ...prev, [account.id]: true }))}
+                className="rounded border border-amber-400/20 px-2.5 py-1 text-[11px] font-semibold text-amber-300/80 transition hover:bg-amber-500/20 hover:text-amber-100"
+              >
+                Dismiss
+              </button>
             </div>
           ))}
         </div>
@@ -431,7 +485,7 @@ export function WhatsAppLeadsClient({
                           </div>
                         ) : <span className="text-[11px] text-slate-500">--</span>}
                       </td>
-                      <td className="py-2.5 text-[11px] text-slate-500">{formatDate(call.createdAt)}</td>
+                      <td suppressHydrationWarning className="py-2.5 text-[11px] text-slate-500">{formatDate(call.createdAt)}</td>
                       <td className="py-2.5 text-center">{call.queuePosition ? <span className="text-xs font-bold text-cyan-200">#{call.queuePosition}</span> : <span className="text-[11px] text-slate-500">--</span>}</td>
                       <td className="py-2.5 text-center text-xs">
                         <LiveCountdown
@@ -629,7 +683,7 @@ export function WhatsAppLeadsClient({
                         {lead.publicFormUrl ? <a className="block max-w-[260px] break-all font-mono text-[11px] text-emerald-400 underline" href={lead.publicFormUrl} target="_blank" rel="noreferrer">{lead.publicFormUrl}</a> : <span className="text-slate-500">Unavailable</span>}
                       </td>
                       <td className="py-3 pr-3 text-xs text-slate-400">
-                        {lead.hasSubmittedForm ? <><span className="block font-semibold text-emerald-300">{lead.formSubmission?.name || lead.formName || "Submitted"}</span><span className="mt-1 block">{formatDate(lead.formSubmission?.submittedAt ?? lead.formSubmittedAt)}</span></> : <span className="text-slate-500">Not submitted</span>}
+                        {lead.hasSubmittedForm ? <><span className="block font-semibold text-emerald-300">{lead.formSubmission?.name || lead.formName || "Submitted"}</span><span suppressHydrationWarning className="mt-1 block">{formatDate(lead.formSubmission?.submittedAt ?? lead.formSubmittedAt)}</span></> : <span className="text-slate-500">Not submitted</span>}
                       </td>
                       <td className="py-3 text-right">
                         <div className="flex justify-end gap-2">
@@ -652,8 +706,8 @@ export function WhatsAppLeadsClient({
                                     {lead.queueItems.map((item, index) => (
                                       <tr key={item.id}>
                                         <td className="py-1.5"><span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${statusTone(item.status)}`}>{statusLabel(item.status)}</span>{index === 0 && <span className="ml-1 text-[10px] text-cyan-300">latest</span>}</td>
-                                        <td className="py-1.5 text-slate-400">{formatDate(item.queuedAt)}</td>
-                                        <td className="py-1.5 text-slate-400">{formatDate(item.sentAt)}</td>
+                                        <td suppressHydrationWarning className="py-1.5 text-slate-400">{formatDate(item.queuedAt)}</td>
+                                        <td suppressHydrationWarning className="py-1.5 text-slate-400">{formatDate(item.sentAt)}</td>
                                         <td className="py-1.5 max-w-xs text-rose-300">{item.lastError || "--"}</td>
                                         <td className="py-1.5 font-mono text-[11px] text-slate-400">{item.formToken}</td>
                                       </tr>
@@ -668,7 +722,7 @@ export function WhatsAppLeadsClient({
                               <dl className="mt-2 grid gap-1 text-xs text-slate-300">
                                 <dt className="text-slate-500">Form token</dt><dd className="break-all font-mono">{lead.formSubmission?.formToken || lead.formToken || "--"}</dd>
                                 <dt className="text-slate-500">Submission status</dt><dd>{lead.formSubmission?.status || "No submission"}</dd>
-                                <dt className="text-slate-500">Submitted time</dt><dd>{formatDate(lead.formSubmission?.submittedAt ?? null)}</dd>
+                                <dt className="text-slate-500">Submitted time</dt><dd suppressHydrationWarning>{formatDate(lead.formSubmission?.submittedAt ?? null)}</dd>
                                 <dt className="text-slate-500">Name</dt><dd>{lead.formSubmission?.name || lead.formName || "--"}</dd>
                                 <dt className="text-slate-500">City</dt><dd>{lead.formSubmission?.city || lead.formCity || "--"}</dd>
                                 <dt className="text-slate-500">Property</dt><dd>{lead.formSubmission?.propertyType || lead.formPropertyType || "--"}</dd>
