@@ -100,7 +100,7 @@ export async function POST(req: NextRequest) {
     const message = body.message || body.requirement || body.notes ? String(body.message || body.requirement || body.notes).trim() : null;
     const ownershipType = body.ownershipType ? String(body.ownershipType).trim() : null;
 
-    // 3. Upsert or create the Lead within this Organization
+    // 3. Upsert or create the Lead within this Organization with name & duplicate protection
     const existing = await db.callLead.findFirst({
       where: {
         phone,
@@ -110,15 +110,32 @@ export async function POST(req: NextRequest) {
     });
 
     const isNew = !existing;
+    const existingName = existing?.displayName?.trim() || "";
+    const incomingName = displayName.trim();
+    const isGenericName = !existingName || existingName.startsWith("Caller ") || existingName.startsWith("Lead ");
+    const isNameDifferent = Boolean(
+      !isGenericName &&
+      incomingName &&
+      existingName.toLowerCase() !== incomingName.toLowerCase()
+    );
+
+    // Preserve existing legitimate name to prevent greeting flip-flops on the same number.
+    // Upgrade name only if existing name was placeholder/generic.
+    const finalDisplayName = isGenericName && incomingName ? incomingName : existingName || incomingName;
+
     const lead = existing
       ? await db.callLead.update({
           where: { id: existing.id },
           data: {
-            displayName: displayName || existing.displayName,
+            displayName: finalDisplayName,
             email: email || existing.email,
             city: city || existing.city,
             address: address || existing.address,
-            message: message ? `${existing.message ? existing.message + "\n---\n" : ""}${message}` : existing.message,
+            message: message
+              ? `${existing.message ? existing.message + "\n---\n" : ""}${isNameDifferent ? `[Alias/Alt Name: ${incomingName}] ` : ""}${message}`
+              : isNameDifferent
+                ? `${existing.message ? existing.message + "\n---\n" : ""}[Alias/Alt Name: ${incomingName}]`
+                : existing.message,
             ownershipType: ownershipType || existing.ownershipType,
             lastContactedAt: new Date(),
           },
@@ -127,7 +144,7 @@ export async function POST(req: NextRequest) {
           data: {
             organizationId: org.id,
             phone,
-            displayName,
+            displayName: incomingName,
             email,
             city,
             address,
@@ -138,16 +155,34 @@ export async function POST(req: NextRequest) {
           },
         });
 
-    // 4. Log ingestion activity
-    await db.callActivity.create({
-      data: {
-        leadId: lead.id,
-        actionType: "NOTE_ADDED",
-        description: isNew
-          ? `Lead ingested via Public API for organization "${org.name}"`
-          : `Lead details updated via Public API for organization "${org.name}"`,
-      },
-    });
+    // 4. Log ingestion activity with duplicate detection
+    if (isNew) {
+      await db.callActivity.create({
+        data: {
+          leadId: lead.id,
+          actionType: "NOTE_ADDED",
+          description: `Lead ingested via Public API for organization "${org.name}"`,
+          metadata: { phone, name: incomingName, source: "public_api" },
+        },
+      });
+    } else {
+      await db.callActivity.create({
+        data: {
+          leadId: lead.id,
+          actionType: "NOTE_ADDED",
+          description: isNameDifferent
+            ? `[Duplicate Lead] Repeat entry for phone ${phone} with name "${incomingName}" (existing: "${existingName}"). WhatsApp duplicate send skipped.`
+            : `[Duplicate Lead] Repeat submission for phone ${phone}. Details updated. WhatsApp duplicate send skipped.`,
+          metadata: {
+            phone,
+            incomingName,
+            existingName,
+            isNameDifferent,
+            source: "public_api",
+          },
+        },
+      });
+    }
 
     // 5. Trigger Auto-Assignment if lead is unassigned
     let assignedUser = null;
@@ -162,21 +197,42 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 6. Optionally trigger WhatsApp automation
+    // 6. WhatsApp automation with strict duplicate suppression
     try {
-      const routingSession = await db.callSession.findFirst({
-        where: { leadId: lead.id, organizationId: org.id, deletedAt: null },
-        orderBy: { firstRingAt: "desc" },
-        select: { companyPhoneId: true },
+      const existingWa = await db.whatsAppQueueItem.findFirst({
+        where: {
+          phone: lead.phone,
+          deletedAt: null,
+          isArchived: false,
+          status: { in: ["QUEUED", "SENDING", "SENT", "OPENED", "FORM_STARTED", "FORM_SUBMITTED"] },
+        },
+        select: { id: true, status: true, displayName: true, sentAt: true },
       });
-      await autoQueueWhatsAppForCaller(
-        lead.phone,
-        lead.displayName,
-        "MISSED",
-        lead.id,
-        routingSession?.companyPhoneId,
-        org.id
-      );
+
+      const existingForm = await db.formSubmission.findFirst({
+        where: { phone: lead.phone, status: "FORM_SUBMITTED", deletedAt: null },
+        select: { id: true },
+      });
+
+      if (existingWa || existingForm) {
+        console.log(
+          `[dedup] Suppressed duplicate WhatsApp message for ${lead.phone}: already in state ${existingWa?.status || "FORM_SUBMITTED"} (name="${existingWa?.displayName || lead.displayName}").`,
+        );
+      } else {
+        const routingSession = await db.callSession.findFirst({
+          where: { leadId: lead.id, organizationId: org.id, deletedAt: null },
+          orderBy: { firstRingAt: "desc" },
+          select: { companyPhoneId: true },
+        });
+        await autoQueueWhatsAppForCaller(
+          lead.phone,
+          lead.displayName,
+          "MISSED",
+          lead.id,
+          routingSession?.companyPhoneId,
+          org.id
+        );
+      }
     } catch (waErr) {
       // WhatsApp sending is best-effort, does not block API response
       console.warn("WhatsApp auto-queue on ingest warning:", waErr);

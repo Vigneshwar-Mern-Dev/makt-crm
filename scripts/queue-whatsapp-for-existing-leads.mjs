@@ -58,7 +58,39 @@ async function main() {
 
     console.log(`Found ${unqueuedLeads.length} leads waiting for WhatsApp intro.`);
 
-    if (unqueuedLeads.length === 0) {
+    // Deduplicate by phone so we never process the same phone number twice in one batch
+    const uniqueLeadsByPhone = [];
+    const seenPhonesInBatch = new Set();
+
+    for (const lead of unqueuedLeads) {
+      if (!lead.phone) continue;
+      if (seenPhonesInBatch.has(lead.phone)) {
+        console.log(`[dedup] Skipped duplicate lead in batch for phone ${lead.phone} ("${lead.displayName}")`);
+        continue;
+      }
+
+      // Check if phone already has any existing queue item or sent item in DB
+      const existingInDb = await prisma.whatsAppQueueItem.findFirst({
+        where: {
+          phone: lead.phone,
+          deletedAt: null,
+          status: { in: ["QUEUED", "SENDING", "SENT", "OPENED", "FORM_STARTED", "FORM_SUBMITTED"] },
+        },
+        select: { id: true, status: true },
+      });
+
+      if (existingInDb) {
+        console.log(`[dedup] Skipped phone ${lead.phone}: already in state ${existingInDb.status}`);
+        continue;
+      }
+
+      seenPhonesInBatch.add(lead.phone);
+      uniqueLeadsByPhone.push(lead);
+    }
+
+    console.log(`After deduplication: ${uniqueLeadsByPhone.length} unique phone numbers to queue.`);
+
+    if (uniqueLeadsByPhone.length === 0) {
       console.log("All leads already have WhatsApp queue records!");
       return;
     }
@@ -66,8 +98,8 @@ async function main() {
     let queuedCount = 0;
     const now = Date.now();
 
-    for (let i = 0; i < unqueuedLeads.length; i++) {
-      const lead = unqueuedLeads[i];
+    for (let i = 0; i < uniqueLeadsByPhone.length; i++) {
+      const lead = uniqueLeadsByPhone[i];
       const formToken = `ft_${randomBytes(12).toString("hex")}`;
       const formLink = `${baseUrl}/f/${formToken}`;
 

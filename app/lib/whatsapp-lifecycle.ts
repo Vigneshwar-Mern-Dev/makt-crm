@@ -141,6 +141,21 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
     });
 
     if (completedQueueItem) {
+      if (callLead?.id) {
+        await tx.callActivity.create({
+          data: {
+            leadId: callLead.id,
+            actionType: "NOTE_ADDED",
+            description: `[Duplicate WhatsApp Suppressed] Phone ${normalizedInput.phone} already received a message earlier. Suppressed duplicate send for "${normalizedInput.displayName}".`,
+            metadata: {
+              phone: normalizedInput.phone,
+              incomingName: normalizedInput.displayName,
+              completedQueueItemId: completedQueueItem.id,
+            },
+          },
+        }).catch(() => {});
+      }
+
       return {
         whatsappLeadId: completedQueueItem.whatsappLeadId,
         queueItemId: completedQueueItem.id,
@@ -159,7 +174,7 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
         deletedAt: null,
       },
       orderBy: { queuedAt: "asc" },
-      select: { id: true, whatsappLeadId: true, formToken: true, status: true, sendAfterAt: true },
+      select: { id: true, whatsappLeadId: true, formToken: true, status: true, sendAfterAt: true, displayName: true },
     });
 
     if (activeQueueItem) {
@@ -185,6 +200,22 @@ export async function queueWhatsAppMessage(input: QueueWhatsAppInput) {
             lastError: null,
           },
         });
+      }
+
+      if (callLead?.id) {
+        await tx.callActivity.create({
+          data: {
+            leadId: callLead.id,
+            actionType: "NOTE_ADDED",
+            description: `[Duplicate WhatsApp Suppressed] Phone ${normalizedInput.phone} is already active in queue (status: ${activeQueueItem.status}). Suppressed duplicate queue attempt for "${normalizedInput.displayName}".`,
+            metadata: {
+              phone: normalizedInput.phone,
+              incomingName: normalizedInput.displayName,
+              activeQueueItemId: activeQueueItem.id,
+              status: activeQueueItem.status,
+            },
+          },
+        }).catch(() => {});
       }
 
       return {

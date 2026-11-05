@@ -112,8 +112,21 @@ export async function autoQueueWhatsAppForCaller(
       );
     } else {
       console.log(
-        `[whatsapp-auto-queue] Skipped ${callerPhone}: ${result.reason} (callLead=${callLeadId ?? "none"}).`,
+        `[whatsapp-auto-queue] Skipped duplicate for ${callerPhone}: ${result.reason} (callLead=${callLeadId ?? "none"}).`,
       );
+      if (callLeadId) {
+        await db.callActivity.create({
+          data: {
+            leadId: callLeadId,
+            actionType: "NOTE_ADDED",
+            description: `[Duplicate WhatsApp Skipped] Automatic message to ${callerPhone} was suppressed (${result.reason.replace(/_/g, " ")}).`,
+            metadata: {
+              phone: callerPhone,
+              reason: result.reason,
+            },
+          },
+        }).catch(() => {});
+      }
     }
   } catch (error) {
     console.error("[whatsapp-auto-queue] Failed to queue WhatsApp message:", error);

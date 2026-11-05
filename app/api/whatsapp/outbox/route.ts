@@ -308,10 +308,58 @@ export async function GET(request: Request) {
           status: "CANCELLED",
           cancelledAt: claimNow,
           claimExpiresAt: null,
-          lastError: "Cancelled because an earlier message was already delivered.",
+          lastError: "Cancelled because an earlier message was already delivered to this phone number.",
         },
       });
+
+      if (candidate.callLeadId) {
+        await tx.callActivity.create({
+          data: {
+            leadId: candidate.callLeadId,
+            actionType: "NOTE_ADDED",
+            description: `[Duplicate Send Cancelled] Delivery to ${candidate.phone} ("${candidate.displayName}") cancelled because a message was already sent to this number earlier.`,
+          },
+        }).catch(() => {});
+      }
+
       return null;
+    }
+
+    // Deduplicate: If redundant QUEUED items exist for this same phone, cancel the extras immediately
+    const otherQueuedItems = await tx.whatsAppQueueItem.findMany({
+      where: {
+        id: { not: candidate.id },
+        phone: candidate.phone,
+        status: "QUEUED",
+        deletedAt: null,
+        isArchived: false,
+      },
+      select: { id: true, displayName: true, callLeadId: true },
+    });
+
+    if (otherQueuedItems.length > 0) {
+      const duplicateIds = otherQueuedItems.map((item) => item.id);
+      await tx.whatsAppQueueItem.updateMany({
+        where: { id: { in: duplicateIds } },
+        data: {
+          status: "CANCELLED",
+          cancelledAt: claimNow,
+          claimExpiresAt: null,
+          lastError: `Duplicate phone number: Cancelled redundant queue item in favor of "${candidate.displayName}".`,
+        },
+      });
+
+      for (const item of otherQueuedItems) {
+        if (item.callLeadId) {
+          await tx.callActivity.create({
+            data: {
+              leadId: item.callLeadId,
+              actionType: "NOTE_ADDED",
+              description: `[Duplicate Queue Cancelled] Redundant queue item for ${candidate.phone} ("${item.displayName}") cancelled in favor of "${candidate.displayName}".`,
+            },
+          }).catch(() => {});
+        }
+      }
     }
 
     const claimed = await tx.whatsAppQueueItem.updateMany({
