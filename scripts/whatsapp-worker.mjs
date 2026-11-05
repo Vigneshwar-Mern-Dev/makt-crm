@@ -122,9 +122,10 @@ const client = new Client({
     dataPath: ".whatsapp-auth-new",
   }),
   webVersionCache: {
-    type: "remote",
-    remotePath: "https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html",
+    type: "local",
   },
+  userAgent:
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
   puppeteer: {
     headless: process.env.WHATSAPP_HEADLESS !== "false",
     protocolTimeout: 300000, // 5 minutes
@@ -135,6 +136,8 @@ const client = new Client({
       "--disable-gpu",
       "--no-zygote",
       "--disable-extensions",
+      "--no-first-run",
+      "--disable-accelerated-2d-canvas",
       "--disk-cache-size=52428800",
       "--media-cache-size=26214400",
       "--disable-application-cache",
@@ -173,9 +176,14 @@ async function handleReconnect(reason = "Connection lost") {
       console.log("[worker] Destroying client...");
       await client.destroy().catch(() => {});
 
-      // If it was an authentication failure, clear the auth directory to force a clean login/QR
-      if (reason.toLowerCase().includes("auth") || reason.toLowerCase().includes("fail")) {
-        console.log(`[worker] Clearing auth session directory for ${ACCOUNT_ID || "primary"} due to auth failure...`);
+      // If it was an authentication failure or explicit reset, clear the auth directory to force a clean login/QR
+      if (
+        reason.toLowerCase().includes("auth") ||
+        reason.toLowerCase().includes("fail") ||
+        reason.toLowerCase().includes("fresh") ||
+        reason.toLowerCase().includes("reset")
+      ) {
+        console.log(`[worker] Clearing auth session directory for ${ACCOUNT_ID || "primary"} due to ${reason}...`);
         const sessionDir = path.join(".whatsapp-auth-new", `session-${ACCOUNT_ID || "primary"}`);
         if (fs.existsSync(sessionDir)) {
           try {
@@ -200,6 +208,10 @@ client.on("qr", async (qr) => {
   ready = false;
   console.log("QR received. Open /admin/whatsapp and scan it.");
   await postBridge({ status: "QR_REQUIRED", qrCodeData: qr, lastError: null });
+});
+
+client.on("loading_screen", (percent, message) => {
+  console.log(`[worker] Pairing loading screen: ${percent}% - ${message}`);
 });
 
 client.on("authenticated", async () => {
@@ -328,6 +340,12 @@ async function sendNextLead() {
         } catch {}
       }
       process.exit(0);
+    }
+
+    if (outbox.qrRequested) {
+      console.log("[worker] Fresh QR requested by server. Clearing session and regenerating QR...");
+      await handleReconnect("Fresh QR reset requested");
+      return { hasWork: false };
     }
 
     // Paused, daily capped, or hourly rate-limited — wait quietly
