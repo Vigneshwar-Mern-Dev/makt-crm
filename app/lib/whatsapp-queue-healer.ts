@@ -11,7 +11,7 @@ export type QueueHealerResult = {
 };
 
 const STUCK_SENDING_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes
-const QUEUE_EXPIRY_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
+const QUEUE_EXPIRY_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (prevents premature expiry during warmup or maintenance)
 const MAX_DELIVERY_ATTEMPTS = 3;
 
 /**
