@@ -28,6 +28,11 @@ if command -v pm2 &> /dev/null; then
   
   echo "==> Saving PM2 startup state..."
   pm2 save
+
+  echo "==> Configuring daily automated backup cron (2:00 AM)..."
+  chmod +x scripts/create-encrypted-backup.sh
+  CRON_JOB="0 2 * * * ${APP_DIR}/scripts/create-encrypted-backup.sh >> ${APP_DIR}/backup.log 2>&1"
+  (crontab -l 2>/dev/null | grep -v "create-encrypted-backup.sh" || true; echo "${CRON_JOB}") | crontab - || echo "Notice: crontab configuration skipped."
 else
   echo "WARNING: pm2 is not installed or not in PATH. Skipping pm2 start."
 fi
