@@ -195,7 +195,14 @@ export default async function AdminWhatsAppPage() {
   const accountStats = await Promise.all(
     accounts.map(async (account) => {
       const [queuedCount, sentToday, sentLastHour] = await Promise.all([
-        db.whatsAppQueueItem.count({ where: { accountId: account.id, status: { in: ["QUEUED", "SENDING"] }, deletedAt: null, isArchived: false } }),
+        db.whatsAppQueueItem.count({
+          where: {
+            OR: [{ accountId: account.id }, { accountId: null }],
+            status: { in: ["QUEUED", "SENDING"] },
+            deletedAt: null,
+            isArchived: false,
+          },
+        }),
         db.whatsAppQueueItem.count({ where: { accountId: account.id, sentAt: { gte: todayStart }, deletedAt: null } }),
         db.whatsAppQueueItem.count({ where: { accountId: account.id, sentAt: { gte: oneHourAgo }, deletedAt: null } }),
       ]);

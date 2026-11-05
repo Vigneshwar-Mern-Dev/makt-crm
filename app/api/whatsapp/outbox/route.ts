@@ -262,7 +262,7 @@ export async function GET(request: Request) {
 
     const candidate = await tx.whatsAppQueueItem.findFirst({
       where: {
-        accountId: account.id,
+        OR: [{ accountId: account.id }, { accountId: null }],
         status: "QUEUED",
         sendAfterAt: { lte: claimNow },
         isArchived: false,
@@ -372,6 +372,7 @@ export async function GET(request: Request) {
       },
       data: {
         status: "SENDING",
+        accountId: account.id,
         sendingAt: claimNow,
         claimExpiresAt: new Date(claimNow.getTime() + CLAIM_LEASE_MS),
         attemptCount: { increment: 1 },

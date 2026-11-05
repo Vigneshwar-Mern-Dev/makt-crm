@@ -23,7 +23,10 @@ const apps = [
   },
 ];
 
-if (process.env.WHATSAPP_WORKER_ENABLED === "true") {
+// Enable WhatsApp workers in production by default unless explicitly disabled with WHATSAPP_WORKER_ENABLED="false"
+const workerDisabled = process.env.WHATSAPP_WORKER_ENABLED === "false";
+
+if (!workerDisabled) {
   apps.push({
     name: "crm-whatsapp-workers",
     cwd: __dirname,
