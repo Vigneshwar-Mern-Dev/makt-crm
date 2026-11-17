@@ -69,7 +69,16 @@ export default async function AdminCompanyPhonesPage() {
       <PageHeader description="Monitor the Android phones feeding call events into CRM. Offline devices and sync backlogs should be fixed before they create blind spots." title="Company phones" />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <CallCenterTabs />
-        <EnrollPhoneModal />
+        <div className="flex items-center gap-2">
+          <a
+            href="/downloads/makt-tracker.apk"
+            download="makt-tracker.apk"
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-emerald-400/30 bg-emerald-500/15 px-3 text-xs font-bold text-emerald-200 transition hover:bg-emerald-500/25"
+          >
+            📲 Download Android APK
+          </a>
+          <EnrollPhoneModal />
+        </div>
       </div>
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard detail="Registered Android phones" label="Devices" value={phones.length} />
