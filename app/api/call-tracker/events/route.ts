@@ -54,7 +54,7 @@ export async function POST(request: NextRequest) {
 
     const limit = await consumeRateLimit({
       key: rateLimitKey("call-tracker-events", authenticatedPhone.id),
-      limit: 300,
+      limit: 1200,
       windowMs: 5 * 60 * 1000,
     });
 
@@ -85,6 +85,8 @@ export async function POST(request: NextRequest) {
       simSubscriptionId: body.simSubscriptionId,
       localContactName: body.localContactName,
       retryCount: body.retryCount,
+      skipAutoReply: body.skipAutoReply,
+      authenticatedCompanyPhone: authenticatedPhone,
       appVersion: body.appVersion,
       androidVersion: body.androidVersion,
       deviceModel: body.deviceModel,

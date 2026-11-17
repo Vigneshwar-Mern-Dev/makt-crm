@@ -1,12 +1,13 @@
 import "server-only";
 
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
-import type { CallDirection, CallEventType, Prisma } from "@prisma/client";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "crypto";
+import type { CallDirection, CallEventType, CompanyPhone, Prisma } from "@prisma/client";
 import { db } from "./db";
 import { hasPrismaCode } from "./prisma-utils";
 import { autoQueueWhatsAppForCaller } from "./whatsapp-auto-queue";
 
 const openSessionStatuses = ["RINGING", "ANSWERED"] as const;
+const AUTO_WHATSAPP_MAX_EVENT_AGE_MS = 2 * 60 * 60 * 1000;
 
 
 export type RegisterCompanyPhoneInput = {
@@ -32,6 +33,8 @@ export type CallTrackerEventInput = {
   simSubscriptionId?: string;
   localContactName?: string;
   retryCount?: number;
+  skipAutoReply?: boolean;
+  authenticatedCompanyPhone?: CompanyPhone;
   appVersion?: string;
   androidVersion?: string;
   deviceModel?: string;
@@ -121,6 +124,64 @@ export function validateRegistrationSecret(secret: unknown) {
   return isSameHash(hashDeviceToken(secret.trim()), hashDeviceToken(expected));
 }
 
+const PAIRING_CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+export async function generateDevicePairingCode() {
+  const code = randomInt(100000, 1000000).toString();
+  const key = `pair-code:${code}`;
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + PAIRING_CODE_TTL_MS);
+
+  await db.rateLimitBucket.upsert({
+    where: { key },
+    create: {
+      key,
+      count: 0,
+      windowStartedAt: now,
+      blockedUntil: expiresAt,
+    },
+    update: {
+      count: 0,
+      windowStartedAt: now,
+      blockedUntil: expiresAt,
+    },
+  });
+
+  return {
+    code,
+    expiresAt: expiresAt.toISOString(),
+    expiresInSeconds: Math.floor(PAIRING_CODE_TTL_MS / 1000),
+  };
+}
+
+export async function claimDevicePairingCode(input: {
+  pairCode: string;
+  deviceId: string;
+  companyPhone: string;
+  label?: string;
+}) {
+  const cleanCode = input.pairCode.trim().replace(/\s+/g, "");
+  const key = `pair-code:${cleanCode}`;
+  const now = new Date();
+
+  const bucket = await db.rateLimitBucket.findUnique({
+    where: { key },
+  });
+
+  if (!bucket || !bucket.blockedUntil || bucket.blockedUntil <= now) {
+    throw new Error("Invalid or expired pairing code. Please generate a new code on the CRM dashboard.");
+  }
+
+  // Delete pairing code immediately so it cannot be reused
+  await db.rateLimitBucket.delete({ where: { key } }).catch(() => {});
+
+  return registerCompanyPhone({
+    companyPhone: input.companyPhone,
+    deviceId: input.deviceId,
+    label: input.label,
+  });
+}
+
 export async function registerCompanyPhone(input: RegisterCompanyPhoneInput) {
   const phoneNumber = normalizeIndianPhoneNumber(input.companyPhone);
   const deviceId = input.deviceId.trim();
@@ -173,7 +234,7 @@ export async function registerCompanyPhone(input: RegisterCompanyPhoneInput) {
         lastSeenAt: new Date(),
       },
     });
-  });
+  }, { maxWait: 10000, timeout: 15000 });
 
   return {
     companyPhone,
@@ -312,17 +373,26 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
   const companyPhoneNumber = normalizeIndianPhoneNumber(input.companyPhone);
   const localSessionId = cleanText(input.callSessionLocalId);
 
-  if (!companyPhoneNumber) {
-    throw new Error("A valid companyPhone value is required.");
-  }
+  const authenticated = input.authenticatedCompanyPhone;
+  const companyPhone =
+    authenticated &&
+    authenticated.deviceId === input.deviceId &&
+    authenticated.isActive &&
+    (!companyPhoneNumber || authenticated.phoneNumber === companyPhoneNumber)
+      ? authenticated
+      : await (async () => {
+          if (!companyPhoneNumber) {
+            throw new Error("A valid companyPhone value is required.");
+          }
 
-  const companyPhone = await db.companyPhone.findFirst({
-    where: {
-      deviceId: input.deviceId,
-      phoneNumber: companyPhoneNumber,
-      isActive: true,
-    },
-  });
+          return db.companyPhone.findFirst({
+            where: {
+              deviceId: input.deviceId,
+              phoneNumber: companyPhoneNumber,
+              isActive: true,
+            },
+          });
+        })();
 
   if (!companyPhone) {
     throw new Error("Registered company phone was not found or is inactive.");
@@ -601,7 +671,7 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
         cleanText(input.localContactName) || `Caller ${effectiveCallerNumber.slice(-4)}`,
       status: session.status,
     };
-  });
+  }, { maxWait: 10000, timeout: 15000 });
 
   let txResult: Awaited<ReturnType<typeof runTransaction>>;
 
@@ -637,7 +707,13 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
   // Auto-queue a WhatsApp reply when the incoming call finishes (either ENDED or MISSED).
   // Runs AFTER the transaction so a WhatsApp failure never rolls back call data.
   // autoQueueWhatsAppForCaller contains safety checks to prevent duplicate queueing/spamming.
+  // Skip auto-queue if explicitly requested (historical sync) or if the call is older than 2 hours.
+  const isFreshLiveEvent =
+    !input.skipAutoReply &&
+    Date.now() - input.occurredAt.getTime() <= AUTO_WHATSAPP_MAX_EVENT_AGE_MS;
+
   if (
+    isFreshLiveEvent &&
     !txResult.duplicate &&
     !txResult.ignored &&
     input.callDirection === "INCOMING" &&
@@ -647,7 +723,7 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
     try {
       const callState = txResult.status === "COMPLETED" ? "ANSWERED" : "MISSED";
       console.log(
-        `[call-tracker] Auto-queuing WhatsApp for ${txResult.callerPhone} (${callState}) — triggered by company phone ${companyPhoneNumber}`,
+        `[call-tracker] Auto-queuing WhatsApp for ${txResult.callerPhone} (${callState}) — triggered by company phone ${companyPhone.phoneNumber}`,
       );
       await autoQueueWhatsAppForCaller(
         txResult.callerPhone,
@@ -663,4 +739,52 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
   }
 
   return txResult;
+}
+
+export async function ingestCallEventsBatch(
+  authenticatedPhone: CompanyPhone,
+  events: Array<Omit<CallTrackerEventInput, "authenticatedCompanyPhone">>,
+) {
+  const ordered = [...events].sort(
+    (a, b) => a.occurredAt.getTime() - b.occurredAt.getTime(),
+  );
+
+  const results: Array<{
+    eventId: string;
+    ok: boolean;
+    duplicate?: boolean;
+    ignored?: boolean;
+    sessionId?: string | null;
+    error?: string;
+  }> = [];
+
+  for (const item of ordered) {
+    try {
+      const res = await ingestCallEvent({
+        ...item,
+        deviceId: authenticatedPhone.deviceId,
+        authenticatedCompanyPhone: authenticatedPhone,
+      });
+      results.push({
+        eventId: item.eventId,
+        ok: true,
+        duplicate: res.duplicate,
+        ignored: "ignored" in res ? res.ignored : false,
+        sessionId: "sessionId" in res ? res.sessionId : null,
+      });
+    } catch (error) {
+      results.push({
+        eventId: item.eventId,
+        ok: false,
+        error: error instanceof Error ? error.message : "Failed to ingest event.",
+      });
+    }
+  }
+
+  return {
+    processed: results.length,
+    succeeded: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    results,
+  };
 }

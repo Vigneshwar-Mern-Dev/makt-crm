@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { db } from "@/app/lib/db";
 import { requireRole, requireUser } from "@/app/lib/session";
-import { requireOrgRole, requireOrgUser } from "@/app/lib/org-session";
+import { requireOrgRole } from "@/app/lib/org-session";
 import { WhatsAppConnectionStatus, WhatsAppLeadStatus } from "@/app/lib/prisma-enums";
 import { queueWhatsAppMessage } from "@/app/lib/whatsapp-lifecycle";
 import { evaluateWhatsAppRetry } from "@/app/lib/whatsapp-retry";

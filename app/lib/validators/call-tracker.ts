@@ -27,6 +27,15 @@ export const callTrackerRegistrationSchema = z.object({
 
 export type CallTrackerRegistrationInput = z.infer<typeof callTrackerRegistrationSchema>;
 
+export const callTrackerPairClaimSchema = z.object({
+  pairCode: nonEmptyTrimmedString,
+  companyPhone: nonEmptyTrimmedString,
+  deviceId: nonEmptyTrimmedString,
+  label: optionalTrimmedString,
+});
+
+export type CallTrackerPairClaimInput = z.infer<typeof callTrackerPairClaimSchema>;
+
 export const callTrackerHealthSchema = z.object({
   appVersion: optionalTrimmedString,
   androidVersion: optionalTrimmedString,
@@ -82,6 +91,7 @@ export const callTrackerEventSchema = callTrackerHealthSchema
     simSubscriptionId: optionalTrimmedString,
     localContactName: optionalTrimmedString,
     retryCount: optionalFiniteNumber,
+    skipAutoReply: optionalBoolean,
   })
   .transform((value) => {
     const normalizedEventType = value.eventType === "OUTGOING" ? "ANSWERED" : value.eventType;
@@ -96,3 +106,10 @@ export const callTrackerEventSchema = callTrackerHealthSchema
   });
 
 export type CallTrackerEventInput = z.infer<typeof callTrackerEventSchema>;
+
+export const callTrackerBatchEventsSchema = z.object({
+  deviceId: nonEmptyTrimmedString,
+  events: z.array(callTrackerEventSchema).min(1).max(100),
+});
+
+export type CallTrackerBatchEventsInput = z.infer<typeof callTrackerBatchEventsSchema>;

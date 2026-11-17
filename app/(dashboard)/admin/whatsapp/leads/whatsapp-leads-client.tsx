@@ -84,11 +84,23 @@ type TabCounts = {
   submitted: number;
 };
 
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
 function formatDate(value: Date | string | null) {
   if (!value) return "Never";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "--";
-  return date.toLocaleString("en-IN", { day: "2-digit", hour: "2-digit", minute: "2-digit", month: "short" });
+  // Convert deterministically to IST (UTC+5:30) with ASCII spaces to avoid React #418 text hydration mismatch
+  const utc = date.getTime() + date.getTimezoneOffset() * 60000;
+  const istDate = new Date(utc + 330 * 60000);
+  const day = String(istDate.getDate()).padStart(2, "0");
+  const month = MONTH_NAMES[istDate.getMonth()];
+  let hours = istDate.getHours();
+  const minutes = String(istDate.getMinutes()).padStart(2, "0");
+  const ampm = hours >= 12 ? "pm" : "am";
+  hours = hours % 12 || 12;
+  const formattedHours = String(hours).padStart(2, "0");
+  return `${day} ${month}, ${formattedHours}:${minutes} ${ampm}`;
 }
 
 function statusTone(status: string) {
@@ -261,12 +273,16 @@ export function WhatsAppLeadsClient({
   activeTab: string;
   tabCounts: TabCounts;
 }) {
-  const [currentAccountHealth, setCurrentAccountHealth] = useState(accountHealth);
+  const [polledHealth, setPolledHealth] = useState<{ status: string; autoReplyEnabled?: boolean } | null>(null);
+  const currentAccountHealth = useMemo(() => {
+    if (!polledHealth) return accountHealth;
+    return accountHealth.map((acc) => ({
+      ...acc,
+      status: polledHealth.status,
+      autoReplyEnabled: polledHealth.autoReplyEnabled ?? acc.autoReplyEnabled,
+    }));
+  }, [accountHealth, polledHealth]);
   const [dismissedWarnings, setDismissedWarnings] = useState<Record<string, boolean>>({});
-
-  useEffect(() => {
-    setCurrentAccountHealth(accountHealth);
-  }, [accountHealth]);
 
   // Real-time status polling so the connection banner reflects live state without full reloads
   useEffect(() => {
@@ -279,13 +295,10 @@ export function WhatsAppLeadsClient({
         if (!active || !data) return;
 
         if (data.status) {
-          setCurrentAccountHealth((prev) =>
-            prev.map((acc) => ({
-              ...acc,
-              status: data.status,
-              autoReplyEnabled: data.autoReplyEnabled ?? acc.autoReplyEnabled,
-            }))
-          );
+          setPolledHealth({
+            status: data.status,
+            autoReplyEnabled: data.autoReplyEnabled,
+          });
         }
       } catch {}
     }
@@ -333,18 +346,19 @@ export function WhatsAppLeadsClient({
     return incomingCallLeads.filter((call) => {
       const t = new Date(call.createdAt).getTime();
       if (dateMode === "today") {
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
-        const todayEnd = new Date();
-        todayEnd.setHours(23, 59, 59, 999);
-        return t >= todayStart.getTime() && t <= todayEnd.getTime();
+        // Deterministic IST (UTC+5:30) day boundary matching server and client perfectly
+        const istOffset = 5.5 * 60 * 60 * 1000;
+        const istNow = new Date(serverTime + istOffset);
+        const startOfDayUtc = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()) - istOffset;
+        const endOfDayUtc = startOfDayUtc + 24 * 60 * 60 * 1000 - 1;
+        return t >= startOfDayUtc && t <= endOfDayUtc;
       }
       if (dateMode === "last24h") return t >= filterNow - 24 * 60 * 60 * 1000;
       const from = customFrom ? new Date(customFrom).getTime() : 0;
       const to = customTo ? new Date(`${customTo}T23:59:59`).getTime() : Infinity;
       return t >= from && t <= to;
     });
-  }, [incomingCallLeads, dateMode, customFrom, customTo, filterNow]);
+  }, [incomingCallLeads, dateMode, customFrom, customTo, filterNow, serverTime]);
 
   useEffect(() => {
     if (dateMode !== "last24h") return;
@@ -487,7 +501,7 @@ export function WhatsAppLeadsClient({
                       </td>
                       <td suppressHydrationWarning className="py-2.5 text-[11px] text-slate-500">{formatDate(call.createdAt)}</td>
                       <td className="py-2.5 text-center">{call.queuePosition ? <span className="text-xs font-bold text-cyan-200">#{call.queuePosition}</span> : <span className="text-[11px] text-slate-500">--</span>}</td>
-                      <td className="py-2.5 text-center text-xs">
+                      <td suppressHydrationWarning className="py-2.5 text-center text-xs">
                         <LiveCountdown
                           targetTime={call.eta?.earliestAt ?? call.targetTime}
                           etaState={call.eta?.state}

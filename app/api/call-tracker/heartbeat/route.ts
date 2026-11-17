@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
 
   const limit = await consumeRateLimit({
     key: rateLimitKey("call-tracker-heartbeat", companyPhone.id),
-    limit: 180,
+    limit: 300,
     windowMs: 5 * 60 * 1000,
   });
 
@@ -98,5 +98,11 @@ export async function POST(request: NextRequest) {
     success: true,
     retryable: false,
     serverTime: new Date().toISOString(),
+    companyPhone: {
+      id: companyPhone.id,
+      phoneNumber: companyPhone.phoneNumber,
+      label: companyPhone.label,
+      deviceId: companyPhone.deviceId,
+    },
   }, { headers: { "Cache-Control": "no-store" } });
 }

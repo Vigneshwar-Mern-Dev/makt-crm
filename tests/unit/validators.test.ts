@@ -8,6 +8,7 @@ import {
   callTrackerRegistrationSchema,
   callTrackerHeartbeatSchema,
   callTrackerEventSchema,
+  callTrackerBatchEventsSchema,
 } from "@/app/lib/validators/call-tracker";
 import { normalizedPhoneString } from "@/app/lib/validators/common";
 
@@ -153,6 +154,29 @@ describe("Validation Schemas", () => {
       expect(result.durationSeconds).toBe(145);
       expect(result.eventType).toBe("ANSWERED");
       expect(result.callDirection).toBe("OUTGOING");
+    });
+
+    it("validates batch call events with skipAutoReply", () => {
+      const payload = {
+        deviceId: "android-dev-pixel-7",
+        events: [
+          {
+            eventId: "evt-batch-001",
+            deviceId: "android-dev-pixel-7",
+            companyPhone: "+919585888319",
+            caller: "+919876543210",
+            eventType: "ENDED",
+            callDirection: "INCOMING",
+            durationSeconds: 32,
+            occurredAt: new Date().toISOString(),
+            skipAutoReply: true,
+          },
+        ],
+      };
+      const result = callTrackerBatchEventsSchema.parse(payload);
+      expect(result.deviceId).toBe("android-dev-pixel-7");
+      expect(result.events).toHaveLength(1);
+      expect(result.events[0].skipAutoReply).toBe(true);
     });
   });
 });

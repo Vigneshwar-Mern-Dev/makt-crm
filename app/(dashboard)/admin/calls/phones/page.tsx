@@ -1,4 +1,5 @@
 import { db } from "@/app/lib/db";
+import { EnrollPhoneModal } from "./enroll-phone-modal";
 import {
   CallCenterTabs,
   EmptyState,
@@ -66,7 +67,10 @@ export default async function AdminCompanyPhonesPage() {
   return (
     <div className="space-y-5 pb-8">
       <PageHeader description="Monitor the Android phones feeding call events into CRM. Offline devices and sync backlogs should be fixed before they create blind spots." title="Company phones" />
-      <CallCenterTabs />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <CallCenterTabs />
+        <EnrollPhoneModal />
+      </div>
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard detail="Registered Android phones" label="Devices" value={phones.length} />
         <StatCard detail="Online without warnings" label="Healthy" tone="emerald" value={`${healthyCount}/${phones.length}`} />

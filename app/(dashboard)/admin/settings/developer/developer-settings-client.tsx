@@ -42,7 +42,7 @@ export function DeveloperSettingsClient({
   const [simulating, setSimulating] = useState(false);
   const [simResult, setSimResult] = useState<{
     status: number;
-    data: any;
+    data: { assignedTo?: { username?: string }; [key: string]: unknown } | null;
     error?: string;
   } | null>(null);
 

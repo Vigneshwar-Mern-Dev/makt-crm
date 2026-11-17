@@ -69,15 +69,32 @@ function isAccountEligible(account: EligibleAccount): { eligible: boolean; reaso
     return { eligible: false, reason: `${account.consecutiveFailures} consecutive failures (threshold: ${account.autoPauseThreshold})` };
   }
 
-  // Check daily cap
-  const dailyCap = effectiveDailyCap(account);
-  if (account._sentToday >= dailyCap) {
-    return { eligible: false, reason: `daily cap reached (${account._sentToday}/${dailyCap})` };
+  // Check active queue backlog cap to prevent overwhelming WhatsApp session and account bans
+  const MAX_ACTIVE_QUEUE_PER_ACCOUNT = 35;
+  if (account._activeQueueCount >= MAX_ACTIVE_QUEUE_PER_ACCOUNT) {
+    return {
+      eligible: false,
+      reason: `active queue backlog full (${account._activeQueueCount}/${MAX_ACTIVE_QUEUE_PER_ACCOUNT})`,
+    };
   }
 
-  // Check hourly cap
-  if (account._sentLastHour >= account.hourlySendLimit) {
-    return { eligible: false, reason: `hourly limit reached (${account._sentLastHour}/${account.hourlySendLimit})` };
+  // Check daily cap (factoring in queued work to prevent burst violations)
+  const dailyCap = effectiveDailyCap(account);
+  const totalDailyLoad = account._sentToday + account._activeQueueCount;
+  if (totalDailyLoad >= dailyCap) {
+    return {
+      eligible: false,
+      reason: `daily cap reached (${totalDailyLoad}/${dailyCap} including active queue)`,
+    };
+  }
+
+  // Check hourly cap (factoring in queued work)
+  const totalHourlyLoad = account._sentLastHour + account._activeQueueCount;
+  if (totalHourlyLoad >= account.hourlySendLimit) {
+    return {
+      eligible: false,
+      reason: `hourly limit reached (${totalHourlyLoad}/${account.hourlySendLimit} including active queue)`,
+    };
   }
 
   // Check heartbeat freshness

@@ -67,3 +67,6 @@ next-env.d.ts
 
 # archives
 *.tar.gz
+
+# standalone Android mobile app repo (managed separately inside mobile-app/)
+/mobile-app/

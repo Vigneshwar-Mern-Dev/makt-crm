@@ -18,9 +18,9 @@ export async function POST(request: NextRequest) {
     const clientIp = getClientIpFromHeaders(request.headers);
     const ipLimit = await consumeRateLimit({
       key: rateLimitKey("call-tracker-register-ip", clientIp),
-      limit: 10,
+      limit: 60,
       windowMs: 60 * 60 * 1000,
-      blockMs: 60 * 60 * 1000,
+      blockMs: 5 * 60 * 1000,
     });
 
     if (!ipLimit.allowed) {
@@ -72,9 +72,9 @@ export async function POST(request: NextRequest) {
     const body = validation.data;
     const deviceLimit = await consumeRateLimit({
       key: rateLimitKey("call-tracker-register-device", body.deviceId),
-      limit: 5,
+      limit: 30,
       windowMs: 60 * 60 * 1000,
-      blockMs: 60 * 60 * 1000,
+      blockMs: 5 * 60 * 1000,
     });
 
     if (!deviceLimit.allowed) {

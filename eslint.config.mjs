@@ -15,6 +15,7 @@ const eslintConfig = defineConfig([
     "generated/**",
     "app/generated/**",
     "ecosystem.config.js",
+    "mobile-app/**",
   ]),
 ]);
 

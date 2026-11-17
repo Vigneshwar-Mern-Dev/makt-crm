@@ -2,7 +2,6 @@ import "server-only";
 
 import { createHash } from "node:crypto";
 import { db } from "./db";
-import { hasPrismaCode } from "./prisma-utils";
 
 type RateLimitOptions = {
   key: string;
@@ -17,7 +16,10 @@ export type RateLimitResult = {
   retryAfterSeconds: number;
 };
 
-
+type RateLimitBucketRow = {
+  count: number;
+  blocked_until: Date | null;
+};
 
 export function rateLimitKey(scope: string, ...identifiers: Array<string | null | undefined>) {
   const digest = createHash("sha256")
@@ -27,85 +29,85 @@ export function rateLimitKey(scope: string, ...identifiers: Array<string | null 
   return `${scope}:${digest}`;
 }
 
+/**
+ * Consumes one request from a PostgreSQL-backed rate-limit bucket using a single atomic UPSERT.
+ * Avoids interactive Serializable transactions so Neon serverless Postgres never hits P2028 pool timeouts.
+ */
 export async function consumeRateLimit(options: RateLimitOptions): Promise<RateLimitResult> {
   if (options.limit < 1 || options.windowMs < 1) {
     throw new Error("Invalid rate-limit configuration.");
   }
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      return await db.$transaction(
-        async (tx) => {
-          const now = new Date();
-          const existing = await tx.rateLimitBucket.findUnique({
-            where: { key: options.key },
-          });
+  const now = new Date();
+  const windowExpiredCutoff = new Date(now.getTime() - options.windowMs);
+  const blockUntilCandidate = new Date(now.getTime() + (options.blockMs ?? options.windowMs));
 
-          if (existing?.blockedUntil && existing.blockedUntil > now) {
-            return {
-              allowed: false,
-              remaining: 0,
-              retryAfterSeconds: Math.max(
-                1,
-                Math.ceil((existing.blockedUntil.getTime() - now.getTime()) / 1000),
-              ),
-            };
-          }
+  const rows = await db.$queryRaw<RateLimitBucketRow[]>`
+    INSERT INTO "rate_limit_buckets" (
+      "key",
+      "count",
+      "window_started_at",
+      "blocked_until",
+      "created_at",
+      "updated_at"
+    )
+    VALUES (
+      ${options.key},
+      1,
+      ${now},
+      NULL,
+      ${now},
+      ${now}
+    )
+    ON CONFLICT ("key") DO UPDATE SET
+      "count" = CASE
+        WHEN "rate_limit_buckets"."blocked_until" IS NOT NULL
+         AND "rate_limit_buckets"."blocked_until" > ${now}
+          THEN "rate_limit_buckets"."count"
+        WHEN "rate_limit_buckets"."window_started_at" <= ${windowExpiredCutoff}
+          THEN 1
+        ELSE "rate_limit_buckets"."count" + 1
+      END,
+      "window_started_at" = CASE
+        WHEN "rate_limit_buckets"."blocked_until" IS NOT NULL
+         AND "rate_limit_buckets"."blocked_until" > ${now}
+          THEN "rate_limit_buckets"."window_started_at"
+        WHEN "rate_limit_buckets"."window_started_at" <= ${windowExpiredCutoff}
+          THEN ${now}
+        ELSE "rate_limit_buckets"."window_started_at"
+      END,
+      "blocked_until" = CASE
+        WHEN "rate_limit_buckets"."blocked_until" IS NOT NULL
+         AND "rate_limit_buckets"."blocked_until" > ${now}
+          THEN "rate_limit_buckets"."blocked_until"
+        WHEN "rate_limit_buckets"."window_started_at" <= ${windowExpiredCutoff}
+          THEN NULL
+        WHEN ("rate_limit_buckets"."count" + 1) <= ${options.limit}
+          THEN NULL
+        ELSE GREATEST(
+          "rate_limit_buckets"."window_started_at" + (${options.windowMs} * interval '1 millisecond'),
+          ${blockUntilCandidate}
+        )
+      END,
+      "updated_at" = ${now}
+    RETURNING "count", "blocked_until"
+  `;
 
-          const windowExpired =
-            !existing || now.getTime() - existing.windowStartedAt.getTime() >= options.windowMs;
-
-          if (windowExpired) {
-            await tx.rateLimitBucket.upsert({
-              where: { key: options.key },
-              create: { key: options.key, count: 1, windowStartedAt: now },
-              update: { count: 1, windowStartedAt: now, blockedUntil: null },
-            });
-
-            return {
-              allowed: true,
-              remaining: options.limit - 1,
-              retryAfterSeconds: 0,
-            };
-          }
-
-          const count = existing.count + 1;
-          const windowEndsAt = new Date(existing.windowStartedAt.getTime() + options.windowMs);
-          const allowed = count <= options.limit;
-          const blockedUntil = allowed
-            ? null
-            : new Date(
-                Math.max(
-                  windowEndsAt.getTime(),
-                  now.getTime() + (options.blockMs ?? options.windowMs),
-                ),
-              );
-
-          await tx.rateLimitBucket.update({
-            where: { key: options.key },
-            data: { count, blockedUntil },
-          });
-
-          return {
-            allowed,
-            remaining: Math.max(0, options.limit - count),
-            retryAfterSeconds: allowed
-              ? 0
-              : Math.max(1, Math.ceil((blockedUntil!.getTime() - now.getTime()) / 1000)),
-          };
-        },
-        { isolationLevel: "Serializable" },
-      );
-    } catch (error) {
-      if (attempt < 2 && (hasPrismaCode(error, "P2034") || hasPrismaCode(error, "P2002"))) {
-        continue;
-      }
-
-      throw error;
-    }
+  const row = rows[0];
+  if (!row) {
+    throw new Error("Rate-limit bucket upsert returned no row.");
   }
 
-  throw new Error("Rate-limit transaction could not be completed.");
+  const isBlocked = Boolean(row.blocked_until && row.blocked_until > now);
+  const allowed = !isBlocked && row.count <= options.limit;
+
+  return {
+    allowed,
+    remaining: isBlocked ? 0 : Math.max(0, options.limit - row.count),
+    retryAfterSeconds: allowed
+      ? 0
+      : Math.max(1, Math.ceil(((row.blocked_until?.getTime() ?? now.getTime() + 1000) - now.getTime()) / 1000)),
+  };
 }
 
 export async function resetRateLimit(key: string) {

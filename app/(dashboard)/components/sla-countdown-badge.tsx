@@ -31,7 +31,6 @@ export function SlaCountdownBadge({
 
   useEffect(() => {
     if (!slaExpiresAt || firstResponseAt) {
-      setRemaining(null);
       return;
     }
 
@@ -42,9 +41,12 @@ export function SlaCountdownBadge({
       setRemaining(diff);
     }
 
-    tick();
+    const immediate = setTimeout(tick, 0);
     const interval = setInterval(tick, 1000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(immediate);
+      clearInterval(interval);
+    };
   }, [slaExpiresAt, firstResponseAt]);
 
   // Already responded — SLA met
