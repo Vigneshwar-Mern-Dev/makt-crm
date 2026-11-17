@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { db } from "@/app/lib/db";
 import { WhatsAppLeadStatus } from "@/app/lib/prisma-enums";
 import { syncCallLeadToSheetBackground } from "@/app/lib/call-lead-actions";
+import { queueWhatsAppMessage } from "@/app/lib/whatsapp-lifecycle";
 import { consumeRateLimit, rateLimitKey } from "@/app/lib/rate-limit";
 import { getClientIpFromHeaders } from "@/app/lib/request-ip";
 
@@ -132,6 +133,7 @@ async function resolveFormContext(token: string) {
     orderBy: [{ queuedAt: "desc" }, { createdAt: "desc" }],
     select: {
       id: true,
+      accountId: true,
       whatsappLeadId: true,
       callLeadId: true,
       phone: true,
@@ -558,6 +560,7 @@ export async function submitFormAction(token: string, formData: FormData) {
         ownershipType: propertyType,
         address: mapsLocation,
         locationSent: true,
+        isImportant: true,
       },
     }),
     db.callActivity.create({
@@ -576,6 +579,40 @@ export async function submitFormAction(token: string, formData: FormData) {
       },
     }),
   ]);
+
+  // Auto-assign lead to agent if unassigned, and send instant confirmation
+  try {
+    const currentLead = await db.callLead.findUnique({
+      where: { id: callLeadId },
+      select: { id: true, assignedToId: true, organizationId: true },
+    });
+
+    if (currentLead && !currentLead.assignedToId && currentLead.organizationId) {
+      const { autoAssignCallLead } = await import("@/app/lib/lead-distribution");
+      await autoAssignCallLead(callLeadId, currentLead.organizationId).catch(() => {});
+    }
+
+    // Auto-queue instant WhatsApp confirmation to customer
+    const confirmationAccount =
+      context.queueItem?.accountId ||
+      (await db.whatsAppAccount.findFirst({
+        where: { autoReplyEnabled: true, status: "CONNECTED" },
+        select: { id: true },
+      }))?.id;
+
+    if (confirmationAccount) {
+      await queueWhatsAppMessage({
+        accountId: confirmationAccount,
+        phone: context.phone,
+        displayName: name,
+        message: `{வணக்கம்|ஹலோ|Hello} ${name}! 🙏\n\nஉங்கள் ATM Franchise விண்ணப்பம் மற்றும் இட விவரங்கள் (${city}) பெறப்பட்டது.\n\nஎங்கள் ATM Franchise நிபுணர் விரைவில் உங்களை தொடர்புகொள்வர்.\n\nநன்றி,\nATM Franchise Team`,
+        callLeadId,
+        source: "form_submission_confirmation",
+      });
+    }
+  } catch (alertErr) {
+    console.error("[submitFormAction] Post-submit alert/confirmation failed:", alertErr);
+  }
 
   try {
     await syncCallLeadToSheetBackground(callLeadId);

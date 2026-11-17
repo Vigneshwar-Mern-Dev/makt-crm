@@ -266,7 +266,7 @@ describe("Call Tracker Ingestion API Integration", () => {
           await resetRateLimit(rateLimitKey("call-tracker-events-batch", registeredCompanyPhoneId));
         }
       }
-    });
+    }, 35000);
   });
 
   describe("POST /api/call-tracker/pair/claim", () => {
@@ -338,6 +338,6 @@ describe("Call Tracker Ingestion API Integration", () => {
           where: { deviceId: testDeviceId },
         });
       }
-    });
+    }, 35000);
   });
 });

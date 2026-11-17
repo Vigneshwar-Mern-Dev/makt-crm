@@ -849,3 +849,12 @@ export async function sendCustomWhatsAppMessageAction(data: {
   }
 }
 
+export async function triggerWhatsAppDripAction() {
+  await requireRole("ADMIN");
+  const { runWhatsAppDripReengagement } = await import("./whatsapp-drip");
+  const result = await runWhatsAppDripReengagement();
+  revalidatePath("/admin/whatsapp/leads");
+  revalidatePath("/admin/calls");
+  return result;
+}
+

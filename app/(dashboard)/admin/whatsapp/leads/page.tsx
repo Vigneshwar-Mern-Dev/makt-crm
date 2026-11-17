@@ -10,6 +10,7 @@ import {
   buildWhatsAppQueueEstimates,
   type WhatsAppQueueEstimate,
 } from "@/app/lib/whatsapp-queue-eta";
+import { getWhatsAppDripEligibilityCount } from "@/app/lib/whatsapp-drip";
 import { WhatsAppLeadsClient } from "./whatsapp-leads-client";
 
 const PAGE_SIZE = 15;
@@ -368,11 +369,13 @@ export default async function AdminWhatsAppLeadsPage({ searchParams }: PageProps
     eligibility: evaluateWhatsAppRetry(lead),
   }));
   const retryableCount = retryPreviewRows.filter((row) => row.eligibility.retryable).length;
+  const dripEligibleCount = await getWhatsAppDripEligibilityCount();
 
   return (
     <WhatsAppLeadsClient
       leads={leadsWithTargetTime}
       failedCount={failedCandidates.length}
+      dripEligibleCount={dripEligibleCount}
       retryPreview={{
         totalFailed: failedCandidates.length,
         retryable: retryableCount,

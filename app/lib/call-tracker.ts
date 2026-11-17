@@ -502,6 +502,7 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
         localContactName: cleanText(input.localContactName),
         firstCompanyPhone: companyPhone.phoneNumber,
         lastCompanyPhone: companyPhone.phoneNumber,
+        organizationId: companyPhone.organizationId,
       },
     });
 
@@ -735,6 +736,16 @@ export async function ingestCallEvent(input: CallTrackerEventInput) {
       );
     } catch (err) {
       console.error("[call-tracker] WhatsApp auto-queue error:", err);
+    }
+  }
+
+  // Auto-assign new lead via Round-Robin distribution if organization is configured
+  if (txResult.leadId && companyPhone.organizationId) {
+    try {
+      const { autoAssignCallLead } = await import("./lead-distribution");
+      await autoAssignCallLead(txResult.leadId, companyPhone.organizationId);
+    } catch (assignErr) {
+      console.warn("[call-tracker] Auto lead assignment skipped:", assignErr);
     }
   }
 

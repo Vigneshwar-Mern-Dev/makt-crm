@@ -36,7 +36,7 @@ export async function runWhatsAppDripReengagement(): Promise<DripRunResult> {
   const candidateLeads = await db.whatsAppLead.findMany({
     where: {
       deletedAt: null,
-      status: { in: ["SENT", "REPLIED", "QUEUED"] },
+      status: { in: ["SENT", "REPLIED", "QUEUED", "OPENED"] },
       createdAt: {
         gte: seventyTwoHoursAgo,
         lte: twentyHoursAgo,
@@ -148,4 +148,25 @@ export async function runWhatsAppDripReengagement(): Promise<DripRunResult> {
   );
 
   return result;
+}
+
+/**
+ * Counts how many leads are currently eligible for 24h re-engagement follow-up.
+ */
+export async function getWhatsAppDripEligibilityCount(): Promise<number> {
+  const now = Date.now();
+  const twentyHoursAgo = new Date(now - 20 * 60 * 60 * 1000);
+  const seventyTwoHoursAgo = new Date(now - 72 * 60 * 60 * 1000);
+
+  return db.whatsAppLead.count({
+    where: {
+      deletedAt: null,
+      status: { in: ["SENT", "REPLIED", "QUEUED", "OPENED"] },
+      createdAt: {
+        gte: seventyTwoHoursAgo,
+        lte: twentyHoursAgo,
+      },
+      formSubmittedAt: null,
+    },
+  });
 }
