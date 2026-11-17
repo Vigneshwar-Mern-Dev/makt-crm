@@ -57,6 +57,10 @@ const nextConfig: NextConfig = {
         source: "/atm-franchise/:token",
         destination: "/f/:token",
       },
+      {
+        source: "/downloads/makt-tracker.apk",
+        destination: "/api/download/apk",
+      },
     ];
   },
 };
